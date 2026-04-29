@@ -28,6 +28,9 @@ Faultline reads a TOML configuration file (default: `./config.toml`). Missing fi
 url = "http://localhost:5001/v1"   # OpenAI-compatible API endpoint
 key = ""                            # API key (defaults to "not-needed" if empty)
 model = "qwen"                      # Model name
+kobold_extras = true                # Auto-detect KoboldCpp extras (real tokenizer,
+                                    # generation aborts, perf metrics). Safe to leave on
+                                    # for non-KoboldCpp backends; detection fails silently.
 
 [agent]
 memory_dir = "./memory"             # Directory for persistent memory files
@@ -81,6 +84,16 @@ The agent can fetch web pages, which are converted from HTML to readable markdow
 ### Context Compaction
 
 When the conversation grows beyond a configurable token threshold, the agent is asked to save its current state to memory and produce a summary. The context is then rebuilt from the system prompt, recent memories, and the summary, allowing indefinite operation.
+
+### KoboldCpp Extras (optional)
+
+When the configured API endpoint is detected to be [KoboldCpp](https://github.com/LostRuins/koboldcpp), Faultline uses three native endpoints that sit alongside the OpenAI compatibility layer:
+
+- **Real tokenization** via `/api/extra/tokencount` for compaction decisions, instead of the 4-chars-per-token heuristic. The heuristic under-counts code/JSON heavily, so without this the agent can be running 30-40% over its self-reported token usage by the time compaction triggers.
+- **Generation aborts** via `/api/extra/abort` on forced shutdown, so the model actually stops generating instead of leaving the GPU/CPU pinned until the backend notices the client is gone.
+- **Backend perf metrics** via `/api/extra/perf` surfaced in the `context_status` tool: last call's input/output tokens, eval speed, total generations, queue depth, uptime.
+
+Detection is best-effort and bounded by a 5s timeout at startup. If the backend isn't KoboldCpp (real OpenAI, vLLM, llama.cpp's openai endpoint, etc.) detection fails silently and Faultline falls back to the heuristic with no other behavioural changes. Set `kobold_extras = false` in `[api]` to skip detection entirely.
 
 ### Self-Modifying Prompts
 

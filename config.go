@@ -22,6 +22,13 @@ type APIConfig struct {
 	URL   string `toml:"url"`
 	Key   string `toml:"key"`
 	Model string `toml:"model"`
+
+	// KoboldExtras enables auto-detection and use of KoboldCpp-specific
+	// endpoints (real tokenization, generation aborts, perf metrics) that
+	// sit alongside the OpenAI compatibility layer at the same base URL.
+	// Safe to leave on for non-KoboldCpp backends: detection fails silently
+	// and the agent falls back to heuristics.
+	KoboldExtras bool `toml:"kobold_extras"`
 }
 
 // AgentConfig holds agent behavior settings.
@@ -80,8 +87,9 @@ func (d duration) Duration() time.Duration {
 func DefaultConfig() *Config {
 	return &Config{
 		API: APIConfig{
-			URL:   "http://192.168.1.5:5001/v1",
-			Model: "qwen",
+			URL:          "http://192.168.1.5:5001/v1",
+			Model:        "qwen",
+			KoboldExtras: true,
 		},
 		Agent: AgentConfig{
 			MemoryDir:           "./memory",

@@ -21,6 +21,7 @@ type Agent struct {
 	tools    *ToolExecutor
 	telegram *Telegram
 	sandbox  *Sandbox
+	kobold   *KoboldExtras // optional; may be nil if backend isn't KoboldCpp
 	logger   *slog.Logger
 }
 
@@ -60,7 +61,24 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 	}
 
 	llm := NewLLMClient(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
-	executor := NewToolExecutor(memory, index, telegram, sandbox, logger, cfg.Agent.MaxTokens)
+
+	// Best-effort detection of KoboldCpp-specific endpoints. If the backend
+	// is anything else (real OpenAI, vLLM, llama.cpp's openai endpoint),
+	// detection fails silently and we keep using the heuristic token count
+	// and skip the abort/perf features. The agent never depends on this.
+	var kobold *KoboldExtras
+	if cfg.API.KoboldExtras {
+		kobold = NewKoboldExtras(cfg.API.URL, logger)
+		detectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := kobold.Detect(detectCtx); err != nil {
+			logger.Info("kobold extras unavailable, using heuristic token estimates",
+				"error", err)
+			kobold = nil
+		}
+		cancel()
+	}
+
+	executor := NewToolExecutor(memory, index, telegram, sandbox, kobold, logger, cfg.Agent.MaxTokens)
 
 	return &Agent{
 		cfg:      cfg,
@@ -70,6 +88,7 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 		tools:    executor,
 		telegram: telegram,
 		sandbox:  sandbox,
+		kobold:   kobold,
 		logger:   logger,
 	}, nil
 }
@@ -94,6 +113,62 @@ func toolMessage(toolCallID, body string) openai.ChatCompletionMessage {
 		Content:    fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), body),
 		ToolCallID: toolCallID,
 	}
+}
+
+// countMessageTokens returns the token count for a message log, using the
+// real tokenizer when available (KoboldCpp's /api/extra/tokencount) and
+// falling back to the heuristic otherwise. The kobold path uses a short
+// timeout so a slow/failing tokenizer never wedges the agent loop.
+func (a *Agent) countMessageTokens(messages []openai.ChatCompletionMessage) int {
+	if a.kobold == nil {
+		return EstimateMessagesTokens(messages)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return a.kobold.CountMessages(ctx, messages)
+}
+
+// abortInFlight asks the backend to stop any currently-running generation.
+// Best-effort and bounded by a short timeout: the parent context is already
+// canceled (forced shutdown), so we use Background() with our own deadline.
+// No-op when KoboldExtras isn't available.
+func (a *Agent) abortInFlight() {
+	if a.kobold == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	a.kobold.Abort(ctx)
+}
+
+// logBackendPerf fetches and logs recent backend performance info. Called
+// after each turn so we can spot regressions in prefix-cache reuse: if
+// last_process_time suddenly spikes when the conversation only grew by one
+// short message, the KV cache was invalidated and we want to know.
+//
+// Bounded by a short timeout. No-op when KoboldExtras isn't available, and
+// silently skips on any error so a transient backend hiccup doesn't pollute
+// the logs.
+func (a *Agent) logBackendPerf() {
+	if a.kobold == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	perf, err := a.kobold.Perf(ctx)
+	if err != nil || perf == nil {
+		return
+	}
+	a.logger.Info("backend perf",
+		"input_tokens", perf.LastInputCount,
+		"output_tokens", perf.LastTokenCount,
+		"process_time_s", perf.LastProcessTime,
+		"eval_time_s", perf.LastEvalTime,
+		"process_speed_tps", perf.LastProcessSpd,
+		"eval_speed_tps", perf.LastEvalSpd,
+		"stop", stopReasonString(perf.StopReason),
+		"queue", perf.Queue,
+	)
 }
 
 // Run starts the agent's continuous operation loop.
@@ -127,7 +202,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		messages, _ = a.injectPendingMessages(messages)
 
 		// Check if compaction is needed
-		tokenEst := EstimateMessagesTokens(messages)
+		tokenEst := a.countMessageTokens(messages)
 		if tokenEst > a.cfg.Agent.CompactionThreshold {
 			a.logger.Warn("context at compaction threshold, compacting",
 				"tokens_est", tokenEst, "threshold", a.cfg.Agent.CompactionThreshold)
@@ -164,8 +239,12 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			// If the parent context was canceled (forced shutdown via
 			// second SIGINT), return the cancellation error verbatim so
 			// main.go's errors.Is(err, context.Canceled) filter recognizes
-			// it as a clean exit rather than a fatal LLM error.
+			// it as a clean exit rather than a fatal LLM error. We also
+			// best-effort tell the backend to actually stop generating;
+			// otherwise the model can keep eating GPU until kcpp realizes
+			// the client has gone.
 			if ctx.Err() != nil {
+				a.abortInFlight()
 				return ctx.Err()
 			}
 			return fmt.Errorf("llm chat: %w", err)
@@ -177,6 +256,12 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if msg.Content != "" {
 			a.logThought(msg.Content)
 		}
+
+		// Log backend perf right after the call returns, while the perf
+		// counters still reflect this generation. Watch last_process_time:
+		// when prefix caching is working it stays low even on huge contexts;
+		// a sudden spike means the KV cache was invalidated.
+		a.logBackendPerf()
 
 		// Drain any collaborator messages that arrived while the LLM was
 		// generating. We will handle them at the next available
@@ -204,7 +289,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 
 		case len(msg.ToolCalls) > 0:
 			// Normal tool execution path.
-			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
+			a.tools.SetContextInfo(a.countMessageTokens(messages))
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(ctx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))
@@ -226,7 +311,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 
 		a.logger.Debug("turn complete",
 			"messages", len(messages),
-			"tokens_est", EstimateMessagesTokens(messages))
+			"tokens_est", a.countMessageTokens(messages))
 	}
 }
 
@@ -265,7 +350,7 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 
 	a.logger.Info("context initialized",
 		"messages", len(messages),
-		"tokens_est", EstimateMessagesTokens(messages))
+		"tokens_est", a.countMessageTokens(messages))
 
 	return messages, prompts, nil
 }
@@ -292,7 +377,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 
 	for i := 0; i < maxCompactionTurns; i++ {
 		// Safety: don't exceed hard token limit during compaction
-		tokenEst := EstimateMessagesTokens(messages)
+		tokenEst := a.countMessageTokens(messages)
 		if tokenEst > int(float64(a.cfg.Agent.MaxTokens)*0.98) {
 			a.logger.Warn("approaching hard limit during compaction, using best available summary")
 			break
@@ -306,6 +391,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 		})
 		if err != nil {
 			if ctx.Err() != nil {
+				a.abortInFlight()
 				return nil, nil, ctx.Err()
 			}
 			return nil, nil, fmt.Errorf("llm chat during compaction: %w", err)
@@ -319,8 +405,10 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 			a.logThought(msg.Content)
 		}
 
+		a.logBackendPerf()
+
 		if len(msg.ToolCalls) > 0 {
-			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
+			a.tools.SetContextInfo(a.countMessageTokens(messages))
 
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(ctx, tc)
@@ -375,7 +463,7 @@ func (a *Agent) rebuildContext(summary string) ([]openai.ChatCompletionMessage, 
 
 	a.logger.Info("context rebuilt",
 		"messages", len(messages),
-		"tokens_est", EstimateMessagesTokens(messages))
+		"tokens_est", a.countMessageTokens(messages))
 
 	return messages, prompts, nil
 }
@@ -497,8 +585,10 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []openai.ChatCompleti
 			a.logThought(msg.Content)
 		}
 
+		a.logBackendPerf()
+
 		if len(msg.ToolCalls) > 0 {
-			a.tools.SetContextInfo(EstimateMessagesTokens(messages))
+			a.tools.SetContextInfo(a.countMessageTokens(messages))
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(saveCtx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))

@@ -772,6 +772,7 @@ type ToolExecutor struct {
 	index         *SearchIndex
 	telegram      *Telegram
 	sandbox       *Sandbox
+	kobold        *KoboldExtras // optional; nil means no perf info in context_status
 	logger        *slog.Logger
 	http          *http.Client
 	cache         *webCache
@@ -779,13 +780,14 @@ type ToolExecutor struct {
 	currentTokens int
 }
 
-// NewToolExecutor creates a new tool executor.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, logger *slog.Logger, maxTokens int) *ToolExecutor {
+// NewToolExecutor creates a new tool executor. kobold may be nil.
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, kobold *KoboldExtras, logger *slog.Logger, maxTokens int) *ToolExecutor {
 	return &ToolExecutor{
 		memory:    memory,
 		index:     index,
 		telegram:  telegram,
 		sandbox:   sandbox,
+		kobold:    kobold,
 		logger:    logger,
 		maxTokens: maxTokens,
 		cache:     newWebCache(60 * time.Second),
@@ -1421,8 +1423,64 @@ func (te *ToolExecutor) contextStatus() string {
 		urgency = "LOW - Context is mostly free."
 	}
 
-	return fmt.Sprintf("Context window status:\n  Used:      ~%d tokens\n  Maximum:   %d tokens\n  Remaining: ~%d tokens\n  Usage:     %.1f%%\n  Urgency:   %s",
-		used, max, remaining, pct, urgency)
+	// Token counts shown here are the real tokenizer values when KoboldCpp
+	// extras are available; otherwise they are a 4-chars-per-token heuristic
+	// that under-counts code/JSON. Reflect that in the label.
+	tokenLabel := "~"
+	if te.kobold.Detected() {
+		tokenLabel = ""
+	}
+
+	out := fmt.Sprintf("Context window status:\n  Used:      %s%d tokens\n  Maximum:   %d tokens\n  Remaining: %s%d tokens\n  Usage:     %.1f%%\n  Urgency:   %s",
+		tokenLabel, used, max, tokenLabel, remaining, pct, urgency)
+
+	// Append backend perf info when available. Bounded by a short timeout
+	// so a slow backend never wedges the tool call.
+	if te.kobold.Detected() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if perf, err := te.kobold.Perf(ctx); err == nil && perf != nil {
+			out += fmt.Sprintf("\n\nBackend (KoboldCpp %s):\n  Last call:  %d in / %d out tokens, %.1fs process + %.1fs eval (%.0f tok/s eval)\n  Last stop:  %s\n  Total gens: %d, queue: %d, idle: %s, uptime: %s",
+				te.kobold.Version(),
+				perf.LastInputCount, perf.LastTokenCount,
+				perf.LastProcessTime, perf.LastEvalTime, perf.LastEvalSpd,
+				stopReasonString(perf.StopReason),
+				perf.TotalGens, perf.Queue,
+				idleStateString(perf.Idle),
+				formatUptime(perf.Uptime),
+			)
+		}
+	}
+
+	return out
+}
+
+// idleStateString translates the integer idle field into a human label.
+// KoboldCpp uses 0=busy, 1=idle (and other values for queued states).
+func idleStateString(state int) string {
+	switch state {
+	case 0:
+		return "busy"
+	case 1:
+		return "idle"
+	default:
+		return fmt.Sprintf("state %d", state)
+	}
+}
+
+// formatUptime renders a seconds count as a short human-readable string.
+func formatUptime(seconds int) string {
+	d := time.Duration(seconds) * time.Second
+	if d >= 24*time.Hour {
+		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
+	if d >= time.Hour {
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func (te *ToolExecutor) sendMessage(argsJSON string) string {

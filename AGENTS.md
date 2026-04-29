@@ -12,6 +12,7 @@ faultline/
   agent.go         Core agent loop, context management, compaction, shutdown
   config.go        TOML configuration loading and struct definitions
   llm.go           OpenAI-compatible LLM client wrapper
+  kobold.go        Optional KoboldCpp native-API client (tokencount, abort, perf)
   memory.go        File-based persistent memory store with trash/restore
   index.go         BM25 search index (pure Go, in-memory)
   tools.go         Tool definitions, dispatch, web fetching, HTML-to-markdown
@@ -51,7 +52,7 @@ Agent.Run() -- infinite loop
   |     +-> memory_search    (BM25 SearchIndex)
   |     +-> send_message     (Telegram outbound)
   |     +-> sandbox_*        (Docker Python execution)
-  |     +-> context_status   (token usage reporting)
+  |     +-> context_status   (token usage + backend perf via KoboldExtras if detected)
   |     +-> get_time         (current timestamp)
   |
   +-> If text-only response: inject continue prompt, loop
@@ -78,8 +79,10 @@ The two-phase shutdown works by maintaining two channels: `shutdownCh` (closed o
 
 The `Agent` struct and its operation loop. Key components:
 
-- **`Agent` struct**: Holds references to all subsystems (`LLMClient`, `MemoryStore`, `SearchIndex`, `ToolExecutor`, `Telegram`, `Sandbox`).
-- **`NewAgent()`**: Initializes all subsystems, builds the initial search index from existing memory files.
+- **`Agent` struct**: Holds references to all subsystems (`LLMClient`, `MemoryStore`, `SearchIndex`, `ToolExecutor`, `Telegram`, `Sandbox`, optional `KoboldExtras`).
+- **`NewAgent()`**: Initializes all subsystems, builds the initial search index from existing memory files. If `kobold_extras` is enabled in config, attempts a 5s detection probe against `/api/extra/version`; on failure the kobold pointer stays nil and the agent uses heuristic token counts.
+- **`countMessageTokens()`**: Single chokepoint for all token estimation. Uses the real KoboldCpp tokenizer when available, falls back to `EstimateMessagesTokens` otherwise. Bounded by a 5s timeout.
+- **`abortInFlight()`**: Called in the LLM-error path when the parent context was canceled (forced shutdown). Best-effort POST to KoboldCpp's `/api/extra/abort` so the model actually stops generating server-side. No-op when KoboldExtras isn't available.
 - **`Run()`**: The main infinite loop. Each iteration: checks for shutdown, injects pending collaborator messages, checks if compaction is needed, sends to LLM (without cancellation), then processes the response -- handling tool calls, deferring tool calls if a collaborator message arrived during generation, or injecting a continue prompt for plain text responses.
 - **`compactContext()`**: Injects the compaction prompt, gives the agent up to 10 turns to save state and produce a summary, then calls `rebuildContext()`.
 - **`rebuildContext()`**: Rebuilds the search index, reloads prompts (which may have been modified by the agent), gathers fresh context memories, and constructs a new message list.
@@ -97,8 +100,18 @@ Defines the `Config` struct with nested sections: `APIConfig`, `AgentConfig`, `T
 
 - Uses `openai.DefaultConfig()` with a custom `BaseURL` for OpenAI-compatible endpoints.
 - `Chat()` sends completion requests, logging only new messages since the last call (avoids re-logging the full context on every turn).
-- `EstimateTokens()` uses a rough heuristic of ~4 characters per token.
-- `EstimateMessagesTokens()` sums token estimates across all messages, including tool call names and arguments, plus a small overhead per message.
+- `EstimateTokens()` uses a rough heuristic of ~4 characters per token. Used as the fallback when KoboldCpp's real tokenizer isn't available.
+- `EstimateMessagesTokens()` sums token estimates across all messages, including tool call names and arguments, plus a small overhead per message. Same fallback role.
+
+### kobold.go (260 lines)
+
+`KoboldExtras` is an optional client for KoboldCpp-specific endpoints (`/api/extra/version`, `/api/extra/tokencount`, `/api/extra/abort`, `/api/extra/perf`) that sit alongside the OpenAI compatibility layer at the same base URL. Activated by `[api] kobold_extras = true` in config (default true). Key details:
+
+- **Detection**: `Detect()` probes `/api/extra/version` at startup with a 5s timeout. Success marks the client as detected; failure leaves it unusable and the agent falls back to heuristics. The agent never depends on this client succeeding.
+- **`CountString` / `CountMessages`**: Real tokenization via `/api/extra/tokencount`. `CountMessages` concatenates message contents and tool-call payloads into a single batched request, then adds a small per-message constant (`koboldChatTemplateOverhead = 10`) to approximate chat-template scaffolding the tokenizer endpoint can't see. Falls back to the heuristic on any error.
+- **`Abort()`**: Best-effort POST to `/api/extra/abort`. Called from the agent's forced-shutdown path so the model actually stops generating instead of leaving the GPU pinned until the backend notices the client is gone.
+- **`Perf()`**: Returns recent backend performance info surfaced in `context_status`.
+- **Nil-safe receivers**: `Detected()` and `Version()` accept a nil `*KoboldExtras` so call sites in the agent and tools can use them without explicit nil checks.
 
 ### memory.go (855 lines)
 
