@@ -731,6 +731,23 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
+			openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        "sandbox_shell",
+					Description: "Run an arbitrary shell command inside the sandbox Docker container. Use this to execute commands like git, ls, cat, wc, grep, find, or any other command available in the container. The command runs with the same mounts as sandbox scripts (/scripts read-only, /input read-only, /output read-write). Output is truncated to 24000 chars.",
+					Parameters: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"command": map[string]interface{}{
+								"type":        "string",
+								"description": "Shell command to execute. Example: 'ls -la /scripts/', 'git log --oneline', 'wc -l /output/results.txt'.",
+							},
+						},
+						"required": []string{"command"},
+					},
+				},
+			},
 		)
 	}
 
@@ -885,9 +902,30 @@ func (te *ToolExecutor) Execute(ctx context.Context, call openai.ToolCall) strin
 		return te.sandboxRemovePackage(ctx, args)
 	case "sandbox_list_packages":
 		return te.sandboxListPackages()
+	case "sandbox_shell":
+		return te.sandboxShell(ctx, args)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}
+}
+
+func (te *ToolExecutor) sandboxShell(ctx context.Context, argsJSON string) string {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+
+	if te.sandbox == nil {
+		return "Sandbox is not configured."
+	}
+
+	output, err := te.sandbox.ShellExec(ctx, args.Command)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return output
 }
 
 func (te *ToolExecutor) webFetch(argsJSON string) string {

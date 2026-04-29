@@ -618,6 +618,58 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+
+// ---------------------------------------------------------------------------
+// Shell execution
+// ---------------------------------------------------------------------------
+
+// ShellExec runs an arbitrary shell command inside the sandbox container.
+// This gives the agent access to tools like git, ls, cat, wc, grep, etc.
+// without needing to write Python wrapper scripts.
+// The command runs in the same Docker image with the same mounts and limits
+// as sandbox script execution.
+func (s *Sandbox) ShellExec(ctx context.Context, command string) (string, error) {
+	if command == "" {
+		return "", fmt.Errorf("command is required")
+	}
+
+	// Safety: reject commands that try to break out of the sandbox
+	if len(command) > 4096 {
+		return "", fmt.Errorf("command too long (max 4096 chars)")
+	}
+
+	start := time.Now()
+	output, err := s.dockerRun(ctx, false, "sh", "-c", command)
+	elapsed := time.Since(start)
+
+	detail := command[:min(len(command), 100)]
+	s.logExec("shell_exec", detail, elapsed, output, err)
+
+	// Truncate output if too long
+	const maxOutput = 24000
+	if len(output) > maxOutput {
+		output = output[:maxOutput] + "\n\n[Output truncated at 24000 characters.]"
+	}
+
+	if err != nil {
+		return fmt.Sprintf("Error: %s\n\nOutput:\n%s", err, output), nil
+	}
+
+	if output == "" {
+		return "(command produced no output)", nil
+	}
+
+	return output, nil
+}
+
+// min returns the smaller of a and b.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ---------------------------------------------------------------------------
 // Package management
 // ---------------------------------------------------------------------------
