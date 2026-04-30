@@ -85,11 +85,11 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 		var result struct {
 			Query struct {
 				Pages []struct {
-					Missing string `json:"missing,omitempty"`
-					Title   string `json:"title"`
-					PageID  int    `json:"pageid"`
-					Extract string `json:"extract"`
-					Namespace struct {
+					Missing     string `json:"missing,omitempty"`
+					Title       string `json:"title"`
+					PageID      int    `json:"pageid"`
+					Extract     string `json:"extract"`
+					Namespace   struct {
 						ID   int    `json:"ns"`
 						Name string `json:"*"`
 					} `json:"namespace"`
