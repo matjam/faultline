@@ -8,13 +8,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/matjam/faultline/internal/config"
+	"github.com/matjam/faultline/internal/log"
 )
 
 func main() {
 	configPath := flag.String("config", "./config.toml", "Path to configuration file")
 	flag.Parse()
 
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", *configPath, "error", err)
 		os.Exit(1)
@@ -39,7 +42,7 @@ func main() {
 	})
 
 	// File handler at debug level (always captures everything)
-	fileWriter, err := NewDailyFileWriter(cfg.Log.Dir)
+	fileWriter, err := log.NewDaily(cfg.Log.Dir)
 	if err != nil {
 		slog.Error("failed to create log directory", "dir", cfg.Log.Dir, "error", err)
 		os.Exit(1)
@@ -51,7 +54,7 @@ func main() {
 	})
 
 	// Combine: console at configured level, file always at debug
-	logger := slog.New(NewMultiHandler(consoleHandler, fileHandler))
+	logger := slog.New(log.NewMultiHandler(consoleHandler, fileHandler))
 	slog.SetDefault(logger)
 
 	// Two-phase shutdown:

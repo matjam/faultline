@@ -1,4 +1,6 @@
-package main
+// Package log provides cross-cutting logging infrastructure: a daily-rotating
+// file writer and a multi-handler that fans slog records to multiple sinks.
+package log
 
 import (
 	"context"
@@ -9,9 +11,9 @@ import (
 	"time"
 )
 
-// DailyFileWriter is an io.Writer that writes to date-stamped log files,
-// automatically rotating to a new file when the date changes.
-type DailyFileWriter struct {
+// Daily is an io.Writer that writes to date-stamped log files, automatically
+// rotating to a new file when the date changes.
+type Daily struct {
 	dir     string
 	prefix  string // optional filename prefix, e.g. "sandbox-"
 	current *os.File
@@ -19,12 +21,12 @@ type DailyFileWriter struct {
 	mu      sync.Mutex
 }
 
-// NewDailyFileWriter creates a writer that outputs to dir/YYYY-MM-DD.log.
-func NewDailyFileWriter(dir string) (*DailyFileWriter, error) {
+// NewDaily creates a writer that outputs to dir/YYYY-MM-DD.log.
+func NewDaily(dir string) (*Daily, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	w := &DailyFileWriter{dir: dir}
+	w := &Daily{dir: dir}
 	// Open today's file immediately so errors surface at startup
 	if _, err := w.ensureFile(); err != nil {
 		return nil, err
@@ -32,19 +34,19 @@ func NewDailyFileWriter(dir string) (*DailyFileWriter, error) {
 	return w, nil
 }
 
-// NewPrefixedDailyFileWriter creates a writer that outputs to dir/prefix-YYYY-MM-DD.log.
-func NewPrefixedDailyFileWriter(dir, prefix string) (*DailyFileWriter, error) {
+// NewDailyPrefixed creates a writer that outputs to dir/prefix-YYYY-MM-DD.log.
+func NewDailyPrefixed(dir, prefix string) (*Daily, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	w := &DailyFileWriter{dir: dir, prefix: prefix}
+	w := &Daily{dir: dir, prefix: prefix}
 	if _, err := w.ensureFile(); err != nil {
 		return nil, err
 	}
 	return w, nil
 }
 
-func (w *DailyFileWriter) ensureFile() (*os.File, error) {
+func (w *Daily) ensureFile() (*os.File, error) {
 	today := time.Now().Format("2006-01-02")
 	if today != w.date || w.current == nil {
 		if w.current != nil {
@@ -65,7 +67,7 @@ func (w *DailyFileWriter) ensureFile() (*os.File, error) {
 	return w.current, nil
 }
 
-func (w *DailyFileWriter) Write(p []byte) (int, error) {
+func (w *Daily) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -77,7 +79,7 @@ func (w *DailyFileWriter) Write(p []byte) (int, error) {
 }
 
 // Close closes the current log file.
-func (w *DailyFileWriter) Close() error {
+func (w *Daily) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.current != nil {

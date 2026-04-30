@@ -1,4 +1,4 @@
-package main
+package log
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 
 func TestDailyFileWriter_WritesToTodaysFile(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewDailyFileWriter(dir)
+	w, err := NewDaily(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestDailyFileWriter_WritesToTodaysFile(t *testing.T) {
 
 func TestDailyFileWriter_PrefixedFilename(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewPrefixedDailyFileWriter(dir, "sandbox-")
+	w, err := NewDailyPrefixed(dir, "sandbox-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestDailyFileWriter_PrefixedFilename(t *testing.T) {
 func TestDailyFileWriter_AppendsToExistingFile(t *testing.T) {
 	dir := t.TempDir()
 
-	w1, err := NewDailyFileWriter(dir)
+	w1, err := NewDaily(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestDailyFileWriter_AppendsToExistingFile(t *testing.T) {
 	}
 	w1.Close()
 
-	w2, err := NewDailyFileWriter(dir)
+	w2, err := NewDaily(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,9 +84,9 @@ func TestDailyFileWriter_AppendsToExistingFile(t *testing.T) {
 
 func TestDailyFileWriter_CreatesMissingDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "logs")
-	w, err := NewDailyFileWriter(dir)
+	w, err := NewDaily(dir)
 	if err != nil {
-		t.Fatalf("NewDailyFileWriter: %v", err)
+		t.Fatalf("NewDaily: %v", err)
 	}
 	defer w.Close()
 

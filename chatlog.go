@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/log"
 )
 
 // ChatLogger writes a human-readable transcript of every message exchanged
@@ -15,18 +17,18 @@ import (
 //
 // One file per day, named chat-YYYY-MM-DD.log under cfg.Log.Dir. Daily
 // rotation and concurrent-write safety are inherited from the underlying
-// DailyFileWriter.
+// log.Daily writer.
 //
 // All methods are nil-safe so callers can omit the chat logger without
 // peppering nil checks at every call site.
 type ChatLogger struct {
-	w *DailyFileWriter
+	w *log.Daily
 }
 
 // NewChatLogger returns a logger that writes to dir/chat-YYYY-MM-DD.log.
 // Directory creation and rotation are handled by the writer.
 func NewChatLogger(dir string) (*ChatLogger, error) {
-	w, err := NewPrefixedDailyFileWriter(dir, "chat-")
+	w, err := log.NewDailyPrefixed(dir, "chat-")
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +93,7 @@ func (c *ChatLogger) Close() error {
 const bannerWidth = 100
 
 // writeMessage formats one message and writes it in a single Write() so
-// concurrent callers don't interleave (DailyFileWriter mutexes its Write).
+// concurrent callers don't interleave (log.Daily mutexes its Write).
 func (c *ChatLogger) writeMessage(m Message, finishReason string) {
 	var sb strings.Builder
 	formatMessage(&sb, m, finishReason)
@@ -100,7 +102,7 @@ func (c *ChatLogger) writeMessage(m Message, finishReason string) {
 
 // formatMessage renders one message as banner + content + tool calls into
 // the supplied builder. Pulled out as a free function so the format is
-// unit-testable without exercising the DailyFileWriter pipeline.
+// unit-testable without exercising the log.Daily pipeline.
 //
 // Format:
 //

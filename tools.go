@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+
+	"github.com/matjam/faultline/internal/config"
 )
 
 // webCacheEntry holds a cached web page fetch result.
@@ -844,19 +846,19 @@ type ToolExecutor struct {
 	index         *SearchIndex
 	telegram      *Telegram
 	sandbox       *Sandbox
-	email         *EmailConfig
+	email         *config.EmailConfig
 	kobold        *KoboldExtras // optional; nil means no perf info in context_status
 	logger        *slog.Logger
 	http          *http.Client
 	cache         *webCache
 	maxTokens     int
 	currentTokens int
-	limits        LimitsConfig
+	limits        config.LimitsConfig
 	maxSleep      time.Duration // upper bound for the `sleep` tool
 }
 
 // NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig, maxSleep time.Duration) *ToolExecutor {
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *config.EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *ToolExecutor {
 	if sandbox != nil {
 		sandbox.SetOutputLimit(limits.SandboxOutputChars)
 	}

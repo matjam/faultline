@@ -8,6 +8,8 @@ import (
 	"time"
 
 	imap "github.com/BrianLeishman/go-imap"
+
+	"github.com/matjam/faultline/internal/config"
 )
 
 // emailClient wraps an IMAP connection for email tool operations.
@@ -17,7 +19,7 @@ type emailClient struct {
 }
 
 // newEmailClient connects to the IMAP server with TLS and LOGIN auth.
-func newEmailClient(cfg EmailConfig, logger *slog.Logger) (*emailClient, error) {
+func newEmailClient(cfg config.EmailConfig, logger *slog.Logger) (*emailClient, error) {
 	imap.DialTimeout = 10 * time.Second
 	imap.CommandTimeout = 30 * time.Second
 

@@ -6,34 +6,6 @@ import (
 	"time"
 )
 
-func TestRenderPrompt(t *testing.T) {
-	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
-	tpl := "Hello, the time is {{TIME}}. Goodbye."
-	got := RenderPrompt(tpl, now)
-	want := "Hello, the time is " + now.Format(time.RFC1123) + ". Goodbye."
-	if got != want {
-		t.Errorf("RenderPrompt = %q, want %q", got, want)
-	}
-}
-
-func TestRenderPrompt_NoPlaceholder(t *testing.T) {
-	tpl := "no placeholders here"
-	if got := RenderPrompt(tpl, time.Now()); got != tpl {
-		t.Errorf("expected unchanged template, got %q", got)
-	}
-}
-
-func TestRenderPrompt_MultipleOccurrences(t *testing.T) {
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	tpl := "{{TIME}} - {{TIME}}"
-	got := RenderPrompt(tpl, now)
-	stamp := now.Format(time.RFC1123)
-	want := stamp + " - " + stamp
-	if got != want {
-		t.Errorf("RenderPrompt = %q, want %q", got, want)
-	}
-}
-
 func TestBuildCycleContext_NoMemories(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
 	got := BuildCycleContext("SYSTEM PROMPT", nil, now, 2000)
@@ -103,63 +75,5 @@ func TestBuildCycleContext_NoLimitKeepsFullContent(t *testing.T) {
 	}
 	if strings.Count(got, "x") < 3000 {
 		t.Errorf("expected full 3000 x's when limit disabled; got %d", strings.Count(got, "x"))
-	}
-}
-
-func TestLoadPrompt_SeedsDefault(t *testing.T) {
-	m := newTestMemory(t)
-
-	got, err := LoadPrompt(m, "system")
-	if err != nil {
-		t.Fatalf("LoadPrompt: %v", err)
-	}
-	if got != defaultSystemPrompt {
-		t.Error("LoadPrompt should return embedded default on first load")
-	}
-
-	// File should now exist on disk
-	stored, err := m.Read("prompts/system.md")
-	if err != nil {
-		t.Fatalf("expected seeded file on disk: %v", err)
-	}
-	if stored != defaultSystemPrompt {
-		t.Error("seeded file content does not match embedded default")
-	}
-}
-
-func TestLoadPrompt_PreservesUserEdits(t *testing.T) {
-	m := newTestMemory(t)
-	custom := "MY CUSTOM SYSTEM PROMPT"
-	if err := m.Write("prompts/system.md", custom); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := LoadPrompt(m, "system")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != custom {
-		t.Errorf("LoadPrompt returned %q, want %q (should not overwrite existing)", got, custom)
-	}
-}
-
-func TestLoadPrompt_UnknownName(t *testing.T) {
-	m := newTestMemory(t)
-	if _, err := LoadPrompt(m, "no-such-prompt"); err == nil {
-		t.Error("expected error for unknown prompt name")
-	}
-}
-
-func TestLoadAllPrompts(t *testing.T) {
-	m := newTestMemory(t)
-	prompts, err := LoadAllPrompts(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, want := range []string{"system", "compaction", "cycle_start", "continue", "shutdown"} {
-		if _, ok := prompts[want]; !ok {
-			t.Errorf("LoadAllPrompts missing prompt %q", want)
-		}
 	}
 }

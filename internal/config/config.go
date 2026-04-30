@@ -1,4 +1,5 @@
-package main
+// Package config loads and validates the agent's TOML configuration.
+package config
 
 import (
 	"fmt"
@@ -156,8 +157,8 @@ func (d duration) Duration() time.Duration {
 	return time.Duration(d)
 }
 
-// DefaultConfig returns a Config with sensible defaults.
-func DefaultConfig() *Config {
+// Default returns a Config with sensible defaults.
+func Default() *Config {
 	return &Config{
 		API: APIConfig{
 			URL:          "http://192.168.1.5:5001/v1",
@@ -195,9 +196,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig reads a TOML config file. Missing fields keep their defaults.
-func LoadConfig(path string) (*Config, error) {
-	cfg := DefaultConfig()
+// Load reads a TOML config file. Missing fields keep their defaults.
+func Load(path string) (*Config, error) {
+	cfg := Default()
 
 	data, err := os.ReadFile(path)
 	if err != nil {

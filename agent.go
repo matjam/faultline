@@ -8,11 +8,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/config"
+	prompt "github.com/matjam/faultline/internal/prompts"
 )
 
 // Agent is the autonomous agent that runs in a continuous loop.
 type Agent struct {
-	cfg      *Config
+	cfg      *config.Config
 	llm      *LLMClient
 	memory   *MemoryStore
 	index    *SearchIndex
@@ -25,7 +28,7 @@ type Agent struct {
 }
 
 // NewAgent creates and initializes a new agent.
-func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, error) {
+func NewAgent(cfg *config.Config, telegram *Telegram, logger *slog.Logger) (*Agent, error) {
 	memory, err := NewMemoryStore(cfg.Agent.MemoryDir)
 	if err != nil {
 		return nil, fmt.Errorf("init memory store: %w", err)
@@ -93,7 +96,7 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 	// EmailConfig is a value type, so &cfg.Email is never nil; passing it
 	// unconditionally would advertise email_fetch to the model and fail at
 	// IMAP connect time instead of being cleanly hidden.
-	var email *EmailConfig
+	var email *config.EmailConfig
 	if cfg.Email.Enabled() {
 		email = &cfg.Email
 	}
@@ -444,7 +447,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 					"idle_streak", idleStreak)
 				content = fmt.Sprintf(idleNudgePrompt, now.Format(time.RFC1123), idleStreak)
 			} else {
-				content = RenderPrompt(prompts["continue"], now)
+				content = prompt.Render(prompts["continue"], now)
 			}
 			messages = append(messages, Message{
 				Role:    RoleUser,
@@ -478,7 +481,7 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 	}
 
 	// Load all mutable prompts from disk (seeding defaults on first run)
-	prompts, err := LoadAllPrompts(a.memory)
+	prompts, err := prompt.LoadAll(a.memory)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("load prompts: %w", err)
 	}
@@ -525,7 +528,7 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 		systemMsg,
 		{
 			Role:    RoleUser,
-			Content: RenderPrompt(prompts["cycle_start"], now),
+			Content: prompt.Render(prompts["cycle_start"], now),
 		},
 	}
 
@@ -550,7 +553,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []Message, toolDefs
 	// Inject compaction prompt
 	messages = append(messages, Message{
 		Role:    RoleUser,
-		Content: RenderPrompt(prompts["compaction"], time.Now()),
+		Content: prompt.Render(prompts["compaction"], time.Now()),
 	})
 
 	var summary string
@@ -610,7 +613,7 @@ func (a *Agent) rebuildContext(summary string) ([]Message, map[string]string, er
 	}
 
 	// Reload prompts (agent may have modified them)
-	prompts, err := LoadAllPrompts(a.memory)
+	prompts, err := prompt.LoadAll(a.memory)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load prompts: %w", err)
 	}
@@ -633,7 +636,7 @@ func (a *Agent) rebuildContext(summary string) ([]Message, map[string]string, er
 	} else {
 		messages = append(messages, Message{
 			Role:    RoleUser,
-			Content: RenderPrompt(prompts["continue"], now),
+			Content: prompt.Render(prompts["continue"], now),
 		})
 	}
 
@@ -738,7 +741,7 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []Message, toolDefs [
 	shutdownPrompt := prompts["shutdown"]
 	messages = append(messages, Message{
 		Role:    RoleUser,
-		Content: RenderPrompt(shutdownPrompt, time.Now()),
+		Content: prompt.Render(shutdownPrompt, time.Now()),
 	})
 
 	const maxSaveTurns = 10

@@ -13,6 +13,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/config"
+	"github.com/matjam/faultline/internal/log"
 )
 
 // Sandbox manages a Python script execution environment backed by Docker and uv.
@@ -25,9 +28,9 @@ type Sandbox struct {
 	network     bool   // allow network access during script execution
 	memoryLimit string // docker --memory value
 	logger      *slog.Logger
-	execLog     *DailyFileWriter // execution log in the logs directory
-	uid         int              // host uid for --user flag
-	gid         int              // host gid for --user flag
+	execLog     *log.Daily // execution log in the logs directory
+	uid         int        // host uid for --user flag
+	gid         int        // host gid for --user flag
 
 	// outputLimit caps stdout/stderr returned to the agent for both
 	// script execution and shell exec. Zero or negative disables the
@@ -71,7 +74,7 @@ dependencies = []
 // NewSandbox creates and initializes a sandbox environment.
 // workDir is the agent's working directory (e.g. /data/faultline).
 // logDir is the directory for sandbox execution logs (e.g. ./logs).
-func NewSandbox(cfg SandboxConfig, workDir, logDir string, logger *slog.Logger) (*Sandbox, error) {
+func NewSandbox(cfg config.SandboxConfig, workDir, logDir string, logger *slog.Logger) (*Sandbox, error) {
 	dir := cfg.Dir
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(workDir, dir)
@@ -81,7 +84,7 @@ func NewSandbox(cfg SandboxConfig, workDir, logDir string, logger *slog.Logger) 
 		logDir = filepath.Join(workDir, logDir)
 	}
 
-	execLog, err := NewPrefixedDailyFileWriter(logDir, "sandbox-")
+	execLog, err := log.NewDailyPrefixed(logDir, "sandbox-")
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox log: %w", err)
 	}

@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"os"
@@ -20,12 +20,12 @@ url = "http://example.com/v1"
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(path)
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 
-	defaults := DefaultConfig()
+	defaults := Default()
 
 	if cfg.API.URL != "http://example.com/v1" {
 		t.Errorf("URL = %q, want override applied", cfg.API.URL)
@@ -65,9 +65,9 @@ sandbox_output_chars = 100000
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(path)
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if cfg.Limits.RecentMemoryChars != 12345 {
 		t.Errorf("RecentMemoryChars = %d, want 12345", cfg.Limits.RecentMemoryChars)
@@ -92,9 +92,9 @@ timeout = "2m30s"
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(path)
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 
 	if got, want := cfg.Sandbox.Timeout.Duration(), 2*time.Minute+30*time.Second; got != want {
@@ -115,13 +115,13 @@ timeout = "not-a-duration"
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path); err == nil {
+	if _, err := Load(path); err == nil {
 		t.Error("expected error parsing invalid duration")
 	}
 }
 
 func TestLoadConfig_MissingFile(t *testing.T) {
-	if _, err := LoadConfig(filepath.Join(t.TempDir(), "no-such.toml")); err == nil {
+	if _, err := Load(filepath.Join(t.TempDir(), "no-such.toml")); err == nil {
 		t.Error("expected error for missing config file")
 	}
 }
@@ -132,7 +132,7 @@ func TestLoadConfig_InvalidTOML(t *testing.T) {
 	if err := os.WriteFile(path, []byte("this is not toml ==="), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path); err == nil {
+	if _, err := Load(path); err == nil {
 		t.Error("expected error for invalid TOML")
 	}
 }
