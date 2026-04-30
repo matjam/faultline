@@ -1,4 +1,7 @@
-package main
+// Package kobold is the KoboldCpp-extras adapter: real tokenization,
+// generation aborts, and backend perf metrics that sit alongside the
+// OpenAI compatibility layer at the same base URL.
+package kobold
 
 import (
 	"bytes"
@@ -10,9 +13,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
-// KoboldExtras provides access to KoboldCpp-specific endpoints that sit
+// Client provides access to KoboldCpp-specific endpoints that sit
 // alongside the OpenAI compatibility layer. These give us:
 //
 //   - Real tokenization via /api/extra/tokencount (vs. our 4-chars-per-token
@@ -25,7 +30,7 @@ import (
 // KoboldCpp server (e.g. real OpenAI, vLLM, llama.cpp's openai endpoint),
 // Detect() returns an error and the rest of the agent falls back to
 // heuristics. The agent never depends on this client succeeding.
-type KoboldExtras struct {
+type Client struct {
 	baseURL string // e.g. "http://localhost:5001" (no /v1, no trailing slash)
 	http    *http.Client
 	logger  *slog.Logger
@@ -34,20 +39,20 @@ type KoboldExtras struct {
 	version  string // KoboldCpp version reported by /api/extra/version
 }
 
-// koboldChatTemplateOverhead is added to each message's real token count to
+// chatTemplateOverhead is added to each message's real token count to
 // approximate the chat-template scaffolding that the OpenAI-compat endpoint
 // inserts but that /api/extra/tokencount can't see (role tags like
 // "<|im_start|>user\n", end-of-turn markers, etc.). Empirical estimate; varies
 // per template (ChatML adds ~7, Llama-3 ~10, Mistral ~5).
-const koboldChatTemplateOverhead = 10
+const chatTemplateOverhead = 10
 
-// NewKoboldExtras constructs a client. apiURL is the OpenAI-compat URL from
-// config (e.g. "http://localhost:5001/v1"); we derive the kcpp root from it
-// by trimming the /v1 suffix.
-func NewKoboldExtras(apiURL string, logger *slog.Logger) *KoboldExtras {
+// New constructs a Client. apiURL is the OpenAI-compat URL from config
+// (e.g. "http://localhost:5001/v1"); we derive the kcpp root from it by
+// trimming the /v1 suffix.
+func New(apiURL string, logger *slog.Logger) *Client {
 	base := strings.TrimRight(apiURL, "/")
 	base = strings.TrimSuffix(base, "/v1")
-	return &KoboldExtras{
+	return &Client{
 		baseURL: base,
 		http:    &http.Client{Timeout: 5 * time.Second},
 		logger:  logger,
@@ -58,7 +63,7 @@ func NewKoboldExtras(apiURL string, logger *slog.Logger) *KoboldExtras {
 // detected on success; returns an error and leaves the client unusable
 // otherwise. Callers should treat detection failure as "this is not a
 // KoboldCpp endpoint" and proceed without the extras.
-func (k *KoboldExtras) Detect(ctx context.Context) error {
+func (k *Client) Detect(ctx context.Context) error {
 	var resp struct {
 		Result  string `json:"result"`
 		Version string `json:"version"`
@@ -77,10 +82,10 @@ func (k *KoboldExtras) Detect(ctx context.Context) error {
 }
 
 // Detected reports whether Detect() succeeded.
-func (k *KoboldExtras) Detected() bool { return k != nil && k.detected }
+func (k *Client) Detected() bool { return k != nil && k.detected }
 
 // Version returns the KoboldCpp version reported during detection.
-func (k *KoboldExtras) Version() string {
+func (k *Client) Version() string {
 	if k == nil {
 		return ""
 	}
@@ -90,9 +95,9 @@ func (k *KoboldExtras) Version() string {
 // CountString returns the real token count for a string using the loaded
 // model's tokenizer. Uses a 5s timeout. On any error the heuristic estimate
 // is returned and the failure is logged at debug level.
-func (k *KoboldExtras) CountString(ctx context.Context, s string) int {
+func (k *Client) CountString(ctx context.Context, s string) int {
 	if !k.Detected() {
-		return EstimateTokens(s)
+		return llm.EstimateTokens(s)
 	}
 	if s == "" {
 		return 0
@@ -103,7 +108,7 @@ func (k *KoboldExtras) CountString(ctx context.Context, s string) int {
 	body := map[string]string{"prompt": s}
 	if err := k.postJSON(ctx, "/api/extra/tokencount", body, &resp); err != nil {
 		k.logger.Debug("tokencount failed, falling back to heuristic", "error", err)
-		return EstimateTokens(s)
+		return llm.EstimateTokens(s)
 	}
 	return resp.Value
 }
@@ -114,10 +119,10 @@ func (k *KoboldExtras) CountString(ctx context.Context, s string) int {
 // constant to approximate chat-template scaffolding that the tokenizer
 // endpoint doesn't see.
 //
-// On any error, falls back to EstimateMessagesTokens.
-func (k *KoboldExtras) CountMessages(ctx context.Context, messages []Message) int {
+// On any error, falls back to llm.EstimateMessagesTokens.
+func (k *Client) CountMessages(ctx context.Context, messages []llm.Message) int {
 	if !k.Detected() || len(messages) == 0 {
-		return EstimateMessagesTokens(messages)
+		return llm.EstimateMessagesTokens(messages)
 	}
 
 	// Build a single prompt-shaped blob covering everything the model
@@ -143,16 +148,16 @@ func (k *KoboldExtras) CountMessages(ctx context.Context, messages []Message) in
 	if err := k.postJSON(ctx, "/api/extra/tokencount", body, &resp); err != nil {
 		k.logger.Debug("tokencount failed, falling back to heuristic",
 			"error", err, "messages", len(messages))
-		return EstimateMessagesTokens(messages)
+		return llm.EstimateMessagesTokens(messages)
 	}
-	return resp.Value + len(messages)*koboldChatTemplateOverhead
+	return resp.Value + len(messages)*chatTemplateOverhead
 }
 
 // Abort tells the backend to stop the currently running generation. This is
 // best-effort: it's safe to call even when no generation is in flight, and
 // errors are logged but not propagated. Used during forced shutdown so the
 // model doesn't keep eating GPU after we exit.
-func (k *KoboldExtras) Abort(ctx context.Context) {
+func (k *Client) Abort(ctx context.Context) {
 	if !k.Detected() {
 		return
 	}
@@ -185,7 +190,7 @@ type PerfInfo struct {
 // Perf fetches recent performance information from the backend. Returns nil
 // without error when the client isn't detected, so callers can use the
 // "perf == nil" check as a feature gate.
-func (k *KoboldExtras) Perf(ctx context.Context) (*PerfInfo, error) {
+func (k *Client) Perf(ctx context.Context) (*PerfInfo, error) {
 	if !k.Detected() {
 		return nil, nil
 	}
@@ -196,8 +201,8 @@ func (k *KoboldExtras) Perf(ctx context.Context) (*PerfInfo, error) {
 	return &perf, nil
 }
 
-// stopReasonString translates the integer stop_reason into a human label.
-func stopReasonString(code int) string {
+// StopReasonString translates the integer stop_reason into a human label.
+func StopReasonString(code int) string {
 	switch code {
 	case -1:
 		return "invalid"
@@ -214,7 +219,7 @@ func stopReasonString(code int) string {
 
 // --- HTTP helpers ----------------------------------------------------------
 
-func (k *KoboldExtras) getJSON(ctx context.Context, path string, out any) error {
+func (k *Client) getJSON(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.baseURL+path, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -222,7 +227,7 @@ func (k *KoboldExtras) getJSON(ctx context.Context, path string, out any) error 
 	return k.do(req, out)
 }
 
-func (k *KoboldExtras) postJSON(ctx context.Context, path string, body, out any) error {
+func (k *Client) postJSON(ctx context.Context, path string, body, out any) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal body: %w", err)
@@ -235,7 +240,7 @@ func (k *KoboldExtras) postJSON(ctx context.Context, path string, body, out any)
 	return k.do(req, out)
 }
 
-func (k *KoboldExtras) do(req *http.Request, out any) error {
+func (k *Client) do(req *http.Request, out any) error {
 	resp, err := k.http.Do(req)
 	if err != nil {
 		return err

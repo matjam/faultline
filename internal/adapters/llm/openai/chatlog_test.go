@@ -1,8 +1,10 @@
-package main
+package openai
 
 import (
 	"strings"
 	"testing"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
 // TestChatLogger_FormatPreservesPriorityFields exercises formatMessage
@@ -10,19 +12,19 @@ import (
 // `<think>` reasoning blocks come through verbatim with newlines intact --
 // unlike the slog debug log where they're escaped onto a single line.
 func TestChatLogger_FormatPreservesNewlinesAndToolCalls(t *testing.T) {
-	msg := Message{
-		Role:    RoleAssistant,
+	msg := llm.Message{
+		Role:    llm.RoleAssistant,
 		Content: "<think>\nLet me check memory.\n</think>\n\nReading the file now.",
-		ToolCalls: []ToolCall{
+		ToolCalls: []llm.ToolCall{
 			{
 				ID:       "call_abc",
-				Type:     ToolTypeFunction,
-				Function: FunctionCall{Name: "memory_read", Arguments: `{"path":"notes"}`},
+				Type:     llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "memory_read", Arguments: `{"path":"notes"}`},
 			},
 			{
 				ID:       "call_def",
-				Type:     ToolTypeFunction,
-				Function: FunctionCall{Name: "get_time", Arguments: `{}`},
+				Type:     llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "get_time", Arguments: `{}`},
 			},
 		},
 	}
@@ -49,8 +51,8 @@ func TestChatLogger_FormatPreservesNewlinesAndToolCalls(t *testing.T) {
 }
 
 func TestChatLogger_FormatToolMessageIncludesCallID(t *testing.T) {
-	msg := Message{
-		Role:       RoleTool,
+	msg := llm.Message{
+		Role:       llm.RoleTool,
 		Content:    "[memory listing here]\nfile1.md\nfile2.md",
 		ToolCallID: "call_abc",
 	}
@@ -72,8 +74,8 @@ func TestChatLogger_FormatToolMessageIncludesCallID(t *testing.T) {
 // log file fails to open at startup, NewAgent sets it to nil and continues).
 func TestChatLogger_NilReceiverIsSafe(t *testing.T) {
 	var c *ChatLogger
-	c.LogIncoming([]Message{{Role: RoleUser, Content: "hi"}}, 0)
-	c.LogResponse(Message{Role: RoleAssistant, Content: "hello"}, "stop")
+	c.LogIncoming([]llm.Message{{Role: llm.RoleUser, Content: "hi"}}, 0)
+	c.LogResponse(llm.Message{Role: llm.RoleAssistant, Content: "hello"}, "stop")
 	c.LogContextRebuild()
 	if err := c.Close(); err != nil {
 		t.Errorf("Close on nil receiver returned error: %v", err)

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/search/bm25"
 )
 
 // BuildCycleContext assembles the full system message with recent memories.
@@ -13,7 +15,7 @@ import (
 //
 // This will move into internal/prompts/ once SearchResult moves out of the
 // main package alongside MemoryStore.
-func BuildCycleContext(systemPrompt string, memories []SearchResult, now time.Time, memoryCharLimit int) string {
+func BuildCycleContext(systemPrompt string, memories []bm25.Result, now time.Time, memoryCharLimit int) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)

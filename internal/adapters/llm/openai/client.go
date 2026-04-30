@@ -1,4 +1,6 @@
-package main
+// Package openai is the OpenAI-compatible /v1/chat/completions adapter.
+// It implements the agent's ChatModel port over plain HTTP and JSON.
+package openai
 
 import (
 	"bytes"
@@ -9,16 +11,18 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
-// LLMClient is a minimal, hand-rolled client for the OpenAI-compatible
+// Client is a minimal, hand-rolled client for the OpenAI-compatible
 // /v1/chat/completions endpoint. It deliberately avoids any external SDK
 // so we can pass vendor-specific sampler fields (top_k, min_p,
 // repetition_penalty, etc.) that the OpenAI spec doesn't define but that
 // most local backends (KoboldCpp, llama.cpp, vLLM) accept on the same
 // endpoint. Streaming, embeddings, image generation, etc. are not
 // implemented because the agent doesn't use them.
-type LLMClient struct {
+type Client struct {
 	apiURL  string // base URL, e.g. http://host:5001/v1 (no trailing slash)
 	apiKey  string // optional; sent as Bearer token when non-empty
 	model   string
@@ -53,12 +57,12 @@ type LLMClient struct {
 	chatLogged int
 }
 
-// NewLLMClient creates a client configured for the given OpenAI-compatible
+// New creates a Client configured for the given OpenAI-compatible
 // endpoint. apiURL must include the version prefix (e.g. "/v1"); we append
 // "/chat/completions" to it. apiKey may be empty for endpoints that don't
 // require auth (most local servers).
-func NewLLMClient(apiURL, apiKey, model string, logger *slog.Logger) *LLMClient {
-	return &LLMClient{
+func New(apiURL, apiKey, model string, logger *slog.Logger) *Client {
+	return &Client{
 		apiURL: strings.TrimRight(apiURL, "/"),
 		apiKey: apiKey,
 		model:  model,
@@ -73,52 +77,21 @@ func NewLLMClient(apiURL, apiKey, model string, logger *slog.Logger) *LLMClient 
 }
 
 // SetChatLog attaches a chat logger that will receive a human-readable
-// transcript of every request/response. Pass nil to disable. The LLMClient
+// transcript of every request/response. Pass nil to disable. The Client
 // does not take ownership of the lifecycle; the caller is responsible for
 // calling Close() on the chat log at shutdown.
-func (l *LLMClient) SetChatLog(c *ChatLogger) {
+func (l *Client) SetChatLog(c *ChatLogger) {
 	l.chatLog = c
 }
 
-// ChatRequest is the public input to Chat(). The Model field is filled in
-// by the client from its configured value, so callers don't set it.
-//
-// Sampler fields use plain (non-pointer) numeric types with omitempty
-// semantics: a zero value means "don't send this field, let the server
-// decide." This matches the previous go-openai behavior. Seed is the
-// exception: it uses *int because 0 is a meaningful seed value, and we
-// treat the config sentinel of 0 as "unset" higher up the stack.
-type ChatRequest struct {
-	Messages []Message
-	Tools    []Tool
-
-	// OpenAI-spec sampler parameters.
-	Temperature      float32
-	TopP             float32
-	PresencePenalty  float32
-	FrequencyPenalty float32
-	Seed             int // 0 = unset (passed through agent config)
-	MaxTokens        int
-
-	// Vendor extensions accepted by KoboldCpp / llama.cpp / vLLM on the
-	// /v1/chat/completions endpoint. Not part of the OpenAI spec; sent
-	// as additional JSON fields when non-zero. Most servers silently
-	// ignore unknown fields, so passing these to an endpoint that
-	// doesn't understand them is harmless.
-	TopK              int
-	MinP              float32
-	RepetitionPenalty float32
-}
-
-// chatRequestWire is the JSON shape we POST. Kept separate from the public
-// ChatRequest so we control exactly which keys appear on the wire (and
-// with what `omitempty` behavior). Fields here are pointers/zero-omitted
-// where needed to avoid sending defaults that override server-side
-// configuration.
+// chatRequestWire is the JSON shape we POST. Kept separate from llm.ChatRequest
+// so we control exactly which keys appear on the wire (and with what
+// `omitempty` behavior). Fields here are pointers/zero-omitted where
+// needed to avoid sending defaults that override server-side configuration.
 type chatRequestWire struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Tools    []Tool    `json:"tools,omitempty"`
+	Model    string        `json:"model"`
+	Messages []llm.Message `json:"messages"`
+	Tools    []llm.Tool    `json:"tools,omitempty"`
 
 	// Sampler params (OpenAI-spec). All `omitempty`: if the agent sets
 	// 0, the field is omitted and the server uses its default.
@@ -147,10 +120,10 @@ type apiError struct {
 }
 
 // Chat sends a chat completion request and returns the parsed response.
-// The HTTP request is bound to ctx; cancelling ctx aborts the in-flight
+// The HTTP request is bound to ctx; canceling ctx aborts the in-flight
 // HTTP call (the server-side generation may still continue until the
-// backend notices, which is what KoboldExtras.Abort is for).
-func (l *LLMClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+// backend notices, which is what kobold.Client.Abort is for).
+func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
 	wire := chatRequestWire{
 		Model:             l.model,
 		Messages:          req.Messages,
@@ -252,7 +225,7 @@ func (l *LLMClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, e
 			resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
-	var out ChatResponse
+	var out llm.ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode chat response: %w", err)
 	}
@@ -281,33 +254,4 @@ func (l *LLMClient) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, e
 	l.chatLogged++
 
 	return &out, nil
-}
-
-// EstimateTokens provides a rough token count for a string.
-// Uses the approximation of ~4 characters per token for English text.
-// This is the heuristic fallback used when KoboldCpp's real tokenizer
-// isn't available; see kobold.go for the accurate path.
-func EstimateTokens(text string) int {
-	if len(text) == 0 {
-		return 0
-	}
-	return len(text) / 4
-}
-
-// EstimateMessagesTokens estimates total tokens across all messages,
-// including a small per-message overhead and per-tool-call overhead to
-// approximate chat-template scaffolding the heuristic can't see.
-func EstimateMessagesTokens(messages []Message) int {
-	total := 0
-	for _, m := range messages {
-		total += EstimateTokens(m.Content)
-		// Account for role and message overhead
-		total += 4
-		for _, tc := range m.ToolCalls {
-			total += EstimateTokens(tc.Function.Name)
-			total += EstimateTokens(tc.Function.Arguments)
-			total += 4
-		}
-	}
-	return total
 }

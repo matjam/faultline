@@ -1,4 +1,6 @@
-package main
+// Package docker is the Docker-backed sandbox adapter for executing
+// untrusted Python scripts in ephemeral containers managed by uv.
+package docker
 
 import (
 	"bufio"
@@ -74,7 +76,7 @@ dependencies = []
 // NewSandbox creates and initializes a sandbox environment.
 // workDir is the agent's working directory (e.g. /data/faultline).
 // logDir is the directory for sandbox execution logs (e.g. ./logs).
-func NewSandbox(cfg config.SandboxConfig, workDir, logDir string, logger *slog.Logger) (*Sandbox, error) {
+func New(cfg config.SandboxConfig, workDir, logDir string, logger *slog.Logger) (*Sandbox, error) {
 	dir := cfg.Dir
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(workDir, dir)
@@ -230,7 +232,7 @@ func (s *Sandbox) resolvePath(folder, name string) (string, error) {
 }
 
 // FileInfo holds metadata about a sandbox file.
-type SandboxFileInfo struct {
+type FileInfo struct {
 	Name    string
 	Size    int64
 	ModTime time.Time
@@ -467,7 +469,7 @@ func (s *Sandbox) InsertFile(folder, name string, line int, content string) (int
 }
 
 // ListFiles returns metadata for all files in the given folder.
-func (s *Sandbox) ListFiles(folder string) ([]SandboxFileInfo, error) {
+func (s *Sandbox) ListFiles(folder string) ([]FileInfo, error) {
 	if err := s.validateFolder(folder); err != nil {
 		return nil, err
 	}
@@ -477,7 +479,7 @@ func (s *Sandbox) ListFiles(folder string) ([]SandboxFileInfo, error) {
 		return nil, fmt.Errorf("list %s: %w", folder, err)
 	}
 
-	var files []SandboxFileInfo
+	var files []FileInfo
 	for _, e := range entries {
 		if e.IsDir() {
 			continue // flat structure, skip subdirectories
@@ -486,7 +488,7 @@ func (s *Sandbox) ListFiles(folder string) ([]SandboxFileInfo, error) {
 		if err != nil {
 			continue
 		}
-		files = append(files, SandboxFileInfo{
+		files = append(files, FileInfo{
 			Name:    e.Name(),
 			Size:    info.Size(),
 			ModTime: info.ModTime(),

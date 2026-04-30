@@ -1,27 +1,32 @@
-package main
+// Package fs is the filesystem-backed memory adapter. Memory files are
+// plain Markdown stored under a base directory, with a soft-delete trash
+// subdirectory for restoration.
+package fs
 
 import (
 	"bufio"
 	"fmt"
-	"io/fs"
+	stdfs "io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/matjam/faultline/internal/search/bm25"
 )
 
 // trashDir is the name of the trash subdirectory inside the memory store.
 const trashDir = ".trash"
 
-// MemoryStore manages the file-based memory system.
-type MemoryStore struct {
+// Store manages the file-based memory system.
+type Store struct {
 	baseDir  string
 	trashDir string // absolute path to the trash directory
 }
 
-// NewMemoryStore creates a new memory store, ensuring the base directory exists.
-func NewMemoryStore(baseDir string) (*MemoryStore, error) {
+// New creates a new memory store, ensuring the base directory exists.
+func New(baseDir string) (*Store, error) {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("create memory directory: %w", err)
 	}
@@ -29,12 +34,12 @@ func NewMemoryStore(baseDir string) (*MemoryStore, error) {
 	if err := os.MkdirAll(trash, 0755); err != nil {
 		return nil, fmt.Errorf("create trash directory: %w", err)
 	}
-	return &MemoryStore{baseDir: baseDir, trashDir: trash}, nil
+	return &Store{baseDir: baseDir, trashDir: trash}, nil
 }
 
-// isTrashPath returns true if the given relative path refers to the trash directory
+// IsTrashPath returns true if the given relative path refers to the trash directory
 // or anything inside it.
-func isTrashPath(path string) bool {
+func IsTrashPath(path string) bool {
 	clean := strings.ToLower(filepath.Clean(path))
 	return clean == trashDir || strings.HasPrefix(clean, trashDir+string(filepath.Separator))
 }
@@ -50,7 +55,7 @@ func cleanPath(path string) string {
 
 // resolvePath safely resolves a memory path, preventing directory traversal.
 // Ensures .md extension is present on file paths.
-func (m *MemoryStore) resolvePath(path string) (string, error) {
+func (m *Store) resolvePath(path string) (string, error) {
 	path = cleanPath(path)
 
 	if path == "" {
@@ -75,7 +80,7 @@ func (m *MemoryStore) resolvePath(path string) (string, error) {
 
 // resolveAnyPath safely resolves a path without forcing .md extension.
 // Used for operations that work on both files and directories.
-func (m *MemoryStore) resolveAnyPath(path string) (string, error) {
+func (m *Store) resolveAnyPath(path string) (string, error) {
 	path = cleanPath(path)
 
 	if path == "" || path == "." {
@@ -95,7 +100,7 @@ func (m *MemoryStore) resolveAnyPath(path string) (string, error) {
 
 // resolveExisting resolves a path to an existing file or directory.
 // Tries the exact path first, then with .md extension for files.
-func (m *MemoryStore) resolveExisting(path string) (string, error) {
+func (m *Store) resolveExisting(path string) (string, error) {
 	path = cleanPath(path)
 
 	if path == "" || path == "." {
@@ -126,7 +131,7 @@ func (m *MemoryStore) resolveExisting(path string) (string, error) {
 }
 
 // Read reads a memory file and returns its content.
-func (m *MemoryStore) Read(path string) (string, error) {
+func (m *Store) Read(path string) (string, error) {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return "", err
@@ -146,7 +151,7 @@ func (m *MemoryStore) Read(path string) (string, error) {
 // ReadLines reads a memory file with optional offset and line limit.
 // offset is 1-indexed (0 or 1 both start from the beginning).
 // lines <= 0 means read all lines. Returns content with line numbers.
-func (m *MemoryStore) ReadLines(path string, offset, lines int) (string, int, error) {
+func (m *Store) ReadLines(path string, offset, lines int) (string, int, error) {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return "", 0, err
@@ -200,7 +205,7 @@ func (m *MemoryStore) ReadLines(path string, offset, lines int) (string, int, er
 // Edit performs an exact string find-and-replace within a memory file.
 // If replaceAll is false, the oldString must appear exactly once in the file
 // or the operation fails. Returns the number of replacements made.
-func (m *MemoryStore) Edit(path string, oldString, newString string, replaceAll bool) (int, error) {
+func (m *Store) Edit(path string, oldString, newString string, replaceAll bool) (int, error) {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return 0, err
@@ -240,7 +245,7 @@ func (m *MemoryStore) Edit(path string, oldString, newString string, replaceAll 
 
 // Append appends content to the end of a memory file.
 // Creates the file (and parent directories) if it does not exist.
-func (m *MemoryStore) Append(path string, content string) error {
+func (m *Store) Append(path string, content string) error {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return err
@@ -268,7 +273,7 @@ func (m *MemoryStore) Append(path string, content string) error {
 // Insert inserts content at a specific line number in a memory file.
 // line is 1-indexed. Content is inserted before the specified line.
 // If line exceeds the file length, content is appended at the end.
-func (m *MemoryStore) Insert(path string, line int, content string) (int, error) {
+func (m *Store) Insert(path string, line int, content string) (int, error) {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return 0, err
@@ -325,7 +330,7 @@ func (m *MemoryStore) Insert(path string, line int, content string) (int, error)
 }
 
 // Write writes content to a memory file, creating directories as needed.
-func (m *MemoryStore) Write(path string, content string) error {
+func (m *Store) Write(path string, content string) error {
 	full, err := m.resolvePath(path)
 	if err != nil {
 		return err
@@ -345,7 +350,7 @@ func (m *MemoryStore) Write(path string, content string) error {
 }
 
 // List lists files and directories under the given path.
-func (m *MemoryStore) List(dir string) ([]MemoryEntry, error) {
+func (m *Store) List(dir string) ([]MemoryEntry, error) {
 	full, err := m.resolveAnyPath(dir)
 	if err != nil {
 		return nil, err
@@ -394,13 +399,13 @@ type MemoryEntry struct {
 // restored to their original location. If a collision occurs in the trash
 // (a file with the same path was previously trashed), a timestamp suffix is
 // appended to avoid overwriting.
-func (m *MemoryStore) Delete(path string) error {
+func (m *Store) Delete(path string) error {
 	if path == "" || path == "/" || path == "." {
 		return fmt.Errorf("cannot delete the root memory directory")
 	}
 
 	clean := cleanPath(path)
-	if isTrashPath(clean) {
+	if IsTrashPath(clean) {
 		return fmt.Errorf("cannot delete from the trash directory; use empty_trash instead")
 	}
 
@@ -454,7 +459,7 @@ func (m *MemoryStore) Delete(path string) error {
 // If the trashed file has a timestamp suffix from a collision rename (e.g.
 // "climate.20260427-143022.md"), the file is restored to the original path
 // without the timestamp ("climate.md").
-func (m *MemoryStore) Restore(trashPath string) (string, error) {
+func (m *Store) Restore(trashPath string) (string, error) {
 	if trashPath == "" || trashPath == "/" || trashPath == "." {
 		return "", fmt.Errorf("path is required")
 	}
@@ -501,7 +506,7 @@ func (m *MemoryStore) Restore(trashPath string) (string, error) {
 
 // resolveTrashPath resolves a path inside the trash directory. Tries the exact
 // path first, then with .md extension appended.
-func (m *MemoryStore) resolveTrashPath(relPath string) (string, error) {
+func (m *Store) resolveTrashPath(relPath string) (string, error) {
 	relPath = cleanPath(relPath)
 	full := filepath.Join(m.trashDir, relPath)
 
@@ -548,7 +553,7 @@ func stripTimestampSuffix(path string) string {
 }
 
 // ListTrash lists files and directories in the trash.
-func (m *MemoryStore) ListTrash(dir string) ([]TrashEntry, error) {
+func (m *Store) ListTrash(dir string) ([]TrashEntry, error) {
 	dir = cleanPath(dir)
 	full := m.trashDir
 	if dir != "" && dir != "." {
@@ -602,7 +607,7 @@ type TrashEntry struct {
 }
 
 // EmptyTrash permanently removes all files and directories from the trash.
-func (m *MemoryStore) EmptyTrash() error {
+func (m *Store) EmptyTrash() error {
 	if err := os.RemoveAll(m.trashDir); err != nil {
 		return fmt.Errorf("empty trash: %w", err)
 	}
@@ -612,7 +617,7 @@ func (m *MemoryStore) EmptyTrash() error {
 
 // cleanEmptyTrashDirs walks up from dir, removing empty directories until
 // it reaches the trash root.
-func (m *MemoryStore) cleanEmptyTrashDirs(dir string) {
+func (m *Store) cleanEmptyTrashDirs(dir string) {
 	for dir != m.trashDir {
 		entries, err := os.ReadDir(dir)
 		if err != nil || len(entries) > 0 {
@@ -624,16 +629,16 @@ func (m *MemoryStore) cleanEmptyTrashDirs(dir string) {
 }
 
 // Move renames/moves a file or directory within the memory store.
-func (m *MemoryStore) Move(src, dst string) error {
+func (m *Store) Move(src, dst string) error {
 	if src == "" || src == "/" || src == "." {
 		return fmt.Errorf("cannot move the root memory directory")
 	}
 
 	// Prevent moving to/from the trash directory -- use delete/restore instead
-	if isTrashPath(cleanPath(src)) {
+	if IsTrashPath(cleanPath(src)) {
 		return fmt.Errorf("cannot move from trash; use memory_restore instead")
 	}
-	if isTrashPath(cleanPath(dst)) {
+	if IsTrashPath(cleanPath(dst)) {
 		return fmt.Errorf("cannot move to trash; use memory_delete instead")
 	}
 
@@ -672,7 +677,7 @@ func (m *MemoryStore) Move(src, dst string) error {
 }
 
 // Stat returns metadata about a file or directory without reading its content.
-func (m *MemoryStore) Stat(path string) (*MemoryEntry, error) {
+func (m *Store) Stat(path string) (*MemoryEntry, error) {
 	full, err := m.resolveExisting(path)
 	if err != nil {
 		return nil, err
@@ -692,13 +697,13 @@ func (m *MemoryStore) Stat(path string) (*MemoryEntry, error) {
 }
 
 // DirSize returns the total size and file count for a directory (recursive).
-func (m *MemoryStore) DirSize(dirPath string) (totalSize int64, fileCount int, err error) {
+func (m *Store) DirSize(dirPath string) (totalSize int64, fileCount int, err error) {
 	full, err := m.resolveAnyPath(dirPath)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	err = filepath.WalkDir(full, func(_ string, d fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(full, func(_ string, d stdfs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
@@ -728,7 +733,7 @@ type GrepMatch struct {
 
 // Grep searches for a regex pattern within a specific memory file.
 // Returns matching lines with their line numbers.
-func (m *MemoryStore) Grep(path string, pattern string) ([]GrepMatch, error) {
+func (m *Store) Grep(path string, pattern string) ([]GrepMatch, error) {
 	content, err := m.Read(path)
 	if err != nil {
 		return nil, err
@@ -751,10 +756,10 @@ func (m *MemoryStore) Grep(path string, pattern string) ([]GrepMatch, error) {
 
 // AllFiles returns all .md files in the memory directory with their content.
 // Used for building the search index.
-func (m *MemoryStore) AllFiles() (map[string]string, error) {
+func (m *Store) AllFiles() (map[string]string, error) {
 	files := make(map[string]string)
 
-	err := filepath.WalkDir(m.baseDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(m.baseDir, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip errors
 		}
@@ -791,7 +796,7 @@ func (m *MemoryStore) AllFiles() (map[string]string, error) {
 }
 
 // RecentFiles returns the N most recently modified .md files.
-func (m *MemoryStore) RecentFiles(n int) ([]SearchResult, error) {
+func (m *Store) RecentFiles(n int) ([]bm25.Result, error) {
 	type fileInfo struct {
 		path    string
 		modTime time.Time
@@ -799,7 +804,7 @@ func (m *MemoryStore) RecentFiles(n int) ([]SearchResult, error) {
 
 	var allFiles []fileInfo
 
-	err := filepath.WalkDir(m.baseDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(m.baseDir, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -838,13 +843,13 @@ func (m *MemoryStore) RecentFiles(n int) ([]SearchResult, error) {
 		allFiles = allFiles[:n]
 	}
 
-	var results []SearchResult
+	var results []bm25.Result
 	for _, f := range allFiles {
 		content, err := m.Read(f.path)
 		if err != nil {
 			continue
 		}
-		results = append(results, SearchResult{
+		results = append(results, bm25.Result{
 			Path:    f.path,
 			Content: content,
 			Score:   0,

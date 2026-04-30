@@ -1,4 +1,14 @@
-package main
+// Package llm holds the OpenAI-compatible chat-completions types that the
+// agent reasons about, plus a heuristic token estimator used as a fallback
+// when no real tokenizer is available.
+//
+// The OpenAI chat-completions wire shape is treated as the de facto domain
+// language for LLM messaging: every backend faultline plausibly targets
+// (real OpenAI, KoboldCpp, vLLM, llama.cpp, Anthropic via proxy) speaks
+// it. Inventing a parallel domain shape just to translate it 1:1 at every
+// adapter boundary would be ceremony for no testability win. See the
+// "pragmatic exception" in Standards/Hexagonal-Architecture.md.
+package llm
 
 // This file defines the wire-format types for the OpenAI-compatible chat
 // completions API. We previously used github.com/sashabaranov/go-openai,

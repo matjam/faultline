@@ -9,32 +9,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matjam/faultline/internal/adapters/llm/kobold"
+	"github.com/matjam/faultline/internal/adapters/llm/openai"
+	"github.com/matjam/faultline/internal/adapters/memory/fs"
+	"github.com/matjam/faultline/internal/adapters/operator/telegram"
+	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
+	"github.com/matjam/faultline/internal/adapters/state/jsonfile"
 	"github.com/matjam/faultline/internal/config"
+	"github.com/matjam/faultline/internal/llm"
 	prompt "github.com/matjam/faultline/internal/prompts"
+	"github.com/matjam/faultline/internal/search/bm25"
 )
 
 // Agent is the autonomous agent that runs in a continuous loop.
 type Agent struct {
 	cfg      *config.Config
-	llm      *LLMClient
-	memory   *MemoryStore
-	index    *SearchIndex
+	llm      *openai.Client
+	memory   *fs.Store
+	index    *bm25.Index
 	tools    *ToolExecutor
-	telegram *Telegram
-	sandbox  *Sandbox
-	kobold   *KoboldExtras // optional; may be nil if backend isn't KoboldCpp
-	chatLog  *ChatLogger   // human-readable transcript; closed on shutdown
+	telegram *telegram.Bot
+	sandbox  *docker.Sandbox
+	kobold   *kobold.Client     // optional; may be nil if backend isn't KoboldCpp
+	chatLog  *openai.ChatLogger // human-readable transcript; closed on shutdown
 	logger   *slog.Logger
 }
 
 // NewAgent creates and initializes a new agent.
-func NewAgent(cfg *config.Config, telegram *Telegram, logger *slog.Logger) (*Agent, error) {
-	memory, err := NewMemoryStore(cfg.Agent.MemoryDir)
+func NewAgent(cfg *config.Config, tg *telegram.Bot, logger *slog.Logger) (*Agent, error) {
+	memory, err := fs.New(cfg.Agent.MemoryDir)
 	if err != nil {
 		return nil, fmt.Errorf("init memory store: %w", err)
 	}
 
-	index := NewSearchIndex()
+	index := bm25.New()
 
 	// Build initial search index from existing memory files
 	docs, err := memory.AllFiles()
@@ -46,14 +54,14 @@ func NewAgent(cfg *config.Config, telegram *Telegram, logger *slog.Logger) (*Age
 	}
 
 	// Set up sandbox if enabled
-	var sandbox *Sandbox
+	var sb *docker.Sandbox
 	if cfg.Sandbox.Enabled {
 		// Determine working directory for resolving relative paths
 		workDir, err := os.Getwd()
 		if err != nil {
 			return nil, fmt.Errorf("get working directory: %w", err)
 		}
-		sandbox, err = NewSandbox(cfg.Sandbox, workDir, cfg.Log.Dir, logger)
+		sb, err = docker.New(cfg.Sandbox, workDir, cfg.Log.Dir, logger)
 		if err != nil {
 			return nil, fmt.Errorf("init sandbox: %w", err)
 		}
@@ -62,32 +70,32 @@ func NewAgent(cfg *config.Config, telegram *Telegram, logger *slog.Logger) (*Age
 		logger.Info("sandbox not configured, Python execution disabled")
 	}
 
-	llm := NewLLMClient(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
+	llmClient := openai.New(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
 
 	// Human-readable chat transcript, separate from the slog debug log.
 	// Failure to open this is non-fatal: we log the error and continue
 	// without a transcript. The slog debug log still has everything, just
 	// in noisy escaped form.
-	chatLog, err := NewChatLogger(cfg.Log.Dir)
+	chatLog, err := openai.NewChatLogger(cfg.Log.Dir)
 	if err != nil {
 		logger.Warn("could not open chat transcript log; continuing without it",
 			"error", err, "dir", cfg.Log.Dir)
 		chatLog = nil
 	}
-	llm.SetChatLog(chatLog)
+	llmClient.SetChatLog(chatLog)
 
 	// Best-effort detection of KoboldCpp-specific endpoints. If the backend
 	// is anything else (real OpenAI, vLLM, llama.cpp's openai endpoint),
 	// detection fails silently and we keep using the heuristic token count
 	// and skip the abort/perf features. The agent never depends on this.
-	var kobold *KoboldExtras
+	var kb *kobold.Client
 	if cfg.API.KoboldExtras {
-		kobold = NewKoboldExtras(cfg.API.URL, logger)
+		kb = kobold.New(cfg.API.URL, logger)
 		detectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := kobold.Detect(detectCtx); err != nil {
+		if err := kb.Detect(detectCtx); err != nil {
 			logger.Info("kobold extras unavailable, using heuristic token estimates",
 				"error", err)
-			kobold = nil
+			kb = nil
 		}
 		cancel()
 	}
@@ -101,17 +109,17 @@ func NewAgent(cfg *config.Config, telegram *Telegram, logger *slog.Logger) (*Age
 		email = &cfg.Email
 	}
 
-	executor := NewToolExecutor(memory, index, telegram, sandbox, email, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
+	executor := NewToolExecutor(memory, index, tg, sb, email, kb, logger, cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 
 	return &Agent{
 		cfg:      cfg,
-		llm:      llm,
+		llm:      llmClient,
 		memory:   memory,
 		index:    index,
 		tools:    executor,
-		telegram: telegram,
-		sandbox:  sandbox,
-		kobold:   kobold,
+		telegram: tg,
+		sandbox:  sb,
+		kobold:   kb,
 		chatLog:  chatLog,
 		logger:   logger,
 	}, nil
@@ -159,9 +167,9 @@ const idleNudgePrompt = "[Time: %s]\n\nYou have produced %d text-only responses 
 // toolMessage builds a tool-role chat message satisfying a tool_call_id.
 // The body is prefixed with an RFC1123 timestamp so the model has a
 // consistent temporal frame for every tool result it sees.
-func toolMessage(toolCallID, body string) Message {
-	return Message{
-		Role:       RoleTool,
+func toolMessage(toolCallID, body string) llm.Message {
+	return llm.Message{
+		Role:       llm.RoleTool,
 		Content:    fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), body),
 		ToolCallID: toolCallID,
 	}
@@ -171,9 +179,9 @@ func toolMessage(toolCallID, body string) Message {
 // real tokenizer when available (KoboldCpp's /api/extra/tokencount) and
 // falling back to the heuristic otherwise. The kobold path uses a short
 // timeout so a slow/failing tokenizer never wedges the agent loop.
-func (a *Agent) countMessageTokens(messages []Message) int {
+func (a *Agent) countMessageTokens(messages []llm.Message) int {
 	if a.kobold == nil {
-		return EstimateMessagesTokens(messages)
+		return llm.EstimateMessagesTokens(messages)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -184,8 +192,8 @@ func (a *Agent) countMessageTokens(messages []Message) int {
 // sampler parameters. Used by every Chat() call site so sampler config
 // stays in one place. Messages and tools are caller-supplied because they
 // vary per call (main loop, compaction, shutdown save).
-func (a *Agent) chatReq(messages []Message, tools []Tool) ChatRequest {
-	return ChatRequest{
+func (a *Agent) chatReq(messages []llm.Message, tools []llm.Tool) llm.ChatRequest {
+	return llm.ChatRequest{
 		Messages:          messages,
 		Tools:             tools,
 		Temperature:       a.cfg.Agent.Temperature,
@@ -238,7 +246,7 @@ func (a *Agent) logBackendPerf() {
 		"eval_time_s", perf.LastEvalTime,
 		"process_speed_tps", perf.LastProcessSpd,
 		"eval_speed_tps", perf.LastEvalSpd,
-		"stop", stopReasonString(perf.StopReason),
+		"stop", kobold.StopReasonString(perf.StopReason),
 		"queue", perf.Queue,
 	)
 }
@@ -348,7 +356,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// No-op when state_file is empty. Errors are logged but not
 		// fatal: a transient disk problem should not kill the agent.
 		if a.cfg.Agent.StateFile != "" && (len(messages) != lastSavedLen || idleStreak != lastSavedIdle) {
-			if err := SaveState(a.cfg.Agent.StateFile, messages, idleStreak); err != nil {
+			if err := jsonfile.Save(a.cfg.Agent.StateFile, messages, idleStreak); err != nil {
 				a.logger.Error("save state failed", "error", err)
 			} else {
 				lastSavedLen = len(messages)
@@ -449,8 +457,8 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			} else {
 				content = prompt.Render(prompts["continue"], now)
 			}
-			messages = append(messages, Message{
-				Role:    RoleUser,
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleUser,
 				Content: content,
 			})
 		}
@@ -472,7 +480,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 //
 // When persistence is disabled or no state file exists, a fresh context
 // is built with the standard system prompt + cycle_start user turn.
-func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
+func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, error) {
 	// Build search index
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
@@ -492,13 +500,13 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 	memories := a.gatherContextMemories()
 	now := time.Now()
 	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
-	systemMsg := Message{
-		Role:    RoleSystem,
+	systemMsg := llm.Message{
+		Role:    llm.RoleSystem,
 		Content: fullSystemPrompt,
 	}
 
 	// Try to resume from a saved state file.
-	saved, savedIdle, err := LoadState(a.cfg.Agent.StateFile, a.logger)
+	saved, savedIdle, err := jsonfile.Load(a.cfg.Agent.StateFile, a.logger)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("load state: %w", err)
 	}
@@ -508,11 +516,11 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 		// a freshly-built one. Keep everything from index 1 onwards.
 		// If the saved log somehow had no system message at index 0,
 		// just prepend the fresh one rather than discarding history.
-		var resumed []Message
-		if saved[0].Role == RoleSystem {
-			resumed = append([]Message{systemMsg}, saved[1:]...)
+		var resumed []llm.Message
+		if saved[0].Role == llm.RoleSystem {
+			resumed = append([]llm.Message{systemMsg}, saved[1:]...)
 		} else {
-			resumed = append([]Message{systemMsg}, saved...)
+			resumed = append([]llm.Message{systemMsg}, saved...)
 		}
 
 		a.logger.Info("context resumed from state file",
@@ -524,10 +532,10 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 	}
 
 	// Fresh start: system message + cycle_start user turn.
-	messages := []Message{
+	messages := []llm.Message{
 		systemMsg,
 		{
-			Role:    RoleUser,
+			Role:    llm.RoleUser,
 			Content: prompt.Render(prompts["cycle_start"], now),
 		},
 	}
@@ -547,12 +555,12 @@ func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 // made to its own prompts during compaction take effect on the next turn.
 // The compaction prompt itself was already rendered before this loop began,
 // so edits to prompts/compaction.md only take effect on the *next* compaction.
-func (a *Agent) compactContext(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) ([]Message, map[string]string, error) {
+func (a *Agent) compactContext(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) ([]llm.Message, map[string]string, error) {
 	a.logger.Info("starting context compaction")
 
 	// Inject compaction prompt
-	messages = append(messages, Message{
-		Role:    RoleUser,
+	messages = append(messages, llm.Message{
+		Role:    llm.RoleUser,
 		Content: prompt.Render(prompts["compaction"], time.Now()),
 	})
 
@@ -605,7 +613,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []Message, toolDefs
 
 // rebuildContext creates a fresh conversation with the system prompt,
 // memories, and an optional summary from compaction.
-func (a *Agent) rebuildContext(summary string) ([]Message, map[string]string, error) {
+func (a *Agent) rebuildContext(summary string) ([]llm.Message, map[string]string, error) {
 	// Rebuild search index in case files changed
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
@@ -623,19 +631,19 @@ func (a *Agent) rebuildContext(summary string) ([]Message, map[string]string, er
 	now := time.Now()
 	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 
-	messages := []Message{
-		{Role: RoleSystem, Content: fullSystemPrompt},
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: fullSystemPrompt},
 	}
 
 	if summary != "" {
-		messages = append(messages, Message{
-			Role: RoleUser,
+		messages = append(messages, llm.Message{
+			Role: llm.RoleUser,
 			Content: fmt.Sprintf("[Context Compacted - %s]\n\nYour context was compacted. Here is your summary from before compaction:\n\n%s",
 				now.Format(time.RFC1123), summary),
 		})
 	} else {
-		messages = append(messages, Message{
-			Role:    RoleUser,
+		messages = append(messages, llm.Message{
+			Role:    llm.RoleUser,
 			Content: prompt.Render(prompts["continue"], now),
 		})
 	}
@@ -653,7 +661,7 @@ func isOperationalFile(path string) bool {
 	if strings.HasPrefix(path, "prompts/") {
 		return true
 	}
-	if isTrashPath(path) {
+	if fs.IsTrashPath(path) {
 		return true
 	}
 	return false
@@ -666,7 +674,7 @@ const contextMemoryCount = 5
 
 // gatherContextMemories finds relevant memories to include in context.
 // Returns up to contextMemoryCount most-recently-modified non-operational files.
-func (a *Agent) gatherContextMemories() []SearchResult {
+func (a *Agent) gatherContextMemories() []bm25.Result {
 	// Request more than we need: operational files (prompts/, trash) are
 	// filtered out below, and we want to land at contextMemoryCount real
 	// memories whenever that many exist on disk.
@@ -675,7 +683,7 @@ func (a *Agent) gatherContextMemories() []SearchResult {
 		return nil
 	}
 
-	results := make([]SearchResult, 0, contextMemoryCount)
+	results := make([]bm25.Result, 0, contextMemoryCount)
 	for _, r := range recent {
 		if isOperationalFile(r.Path) {
 			continue
@@ -691,7 +699,7 @@ func (a *Agent) gatherContextMemories() []SearchResult {
 // injectPendingMessages checks for queued collaborator messages and appends
 // them to the conversation. Returns the updated messages and whether any
 // were injected.
-func (a *Agent) injectPendingMessages(messages []Message) ([]Message, bool) {
+func (a *Agent) injectPendingMessages(messages []llm.Message) ([]llm.Message, bool) {
 	if a.telegram == nil {
 		return messages, false
 	}
@@ -708,11 +716,11 @@ func (a *Agent) injectPendingMessages(messages []Message) ([]Message, bool) {
 // turn and appends them to the conversation. Used by both the between-turn
 // injector and the post-response handler when messages arrive during
 // generation.
-func (a *Agent) appendCollaboratorMessages(messages []Message, pending []string) []Message {
+func (a *Agent) appendCollaboratorMessages(messages []llm.Message, pending []string) []llm.Message {
 	for _, text := range pending {
 		a.logger.Info("injecting collaborator message into conversation", "text", text)
-		messages = append(messages, Message{
-			Role: RoleUser,
+		messages = append(messages, llm.Message{
+			Role: llm.RoleUser,
 			Content: fmt.Sprintf("[Collaborator message - %s]\n\nYour collaborator says: %s\n\nReply with send_message before continuing. If their message changes what you should do next, adjust your plan accordingly; otherwise resume where you left off.",
 				time.Now().Format(time.RFC1123), text),
 		})
@@ -721,7 +729,7 @@ func (a *Agent) appendCollaboratorMessages(messages []Message, pending []string)
 }
 
 // handleShutdown wraps gracefulSave and translates errShutdown to nil.
-func (a *Agent) handleShutdown(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) error {
+func (a *Agent) handleShutdown(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) error {
 	err := a.gracefulSave(ctx, messages, toolDefs, prompts)
 	if errors.Is(err, errShutdown) {
 		return nil
@@ -731,7 +739,7 @@ func (a *Agent) handleShutdown(ctx context.Context, messages []Message, toolDefs
 
 // gracefulSave gives the agent a limited number of turns to save its state
 // before the process exits. Uses a 2-minute timeout.
-func (a *Agent) gracefulSave(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) error {
+func (a *Agent) gracefulSave(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) error {
 	a.logger.Info("graceful shutdown: asking agent to save state")
 
 	saveCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -739,8 +747,8 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []Message, toolDefs [
 
 	// Load the mutable shutdown prompt
 	shutdownPrompt := prompts["shutdown"]
-	messages = append(messages, Message{
-		Role:    RoleUser,
+	messages = append(messages, llm.Message{
+		Role:    llm.RoleUser,
 		Content: prompt.Render(shutdownPrompt, time.Now()),
 	})
 

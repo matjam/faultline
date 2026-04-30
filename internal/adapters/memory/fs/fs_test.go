@@ -1,4 +1,4 @@
-package main
+package fs
 
 import (
 	"os"
@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-// newTestMemory returns a MemoryStore rooted in a fresh temp directory.
-func newTestMemory(t *testing.T) *MemoryStore {
+// newTestMemory returns a Store rooted in a fresh temp directory.
+func newTestMemory(t *testing.T) *Store {
 	t.Helper()
-	m, err := NewMemoryStore(t.TempDir())
+	m, err := New(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewMemoryStore: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return m
 }
@@ -35,19 +35,19 @@ func TestCleanPath(t *testing.T) {
 }
 
 func TestIsTrashPath(t *testing.T) {
-	if !isTrashPath(".trash") {
+	if !IsTrashPath(".trash") {
 		t.Error(".trash should be trash path")
 	}
-	if !isTrashPath(".trash/foo.md") {
+	if !IsTrashPath(".trash/foo.md") {
 		t.Error(".trash/foo.md should be trash path")
 	}
-	if !isTrashPath(".TRASH/Foo") {
+	if !IsTrashPath(".TRASH/Foo") {
 		t.Error("case-insensitive match expected for .TRASH/Foo")
 	}
-	if isTrashPath("notes.md") {
+	if IsTrashPath("notes.md") {
 		t.Error("notes.md should not be trash path")
 	}
-	if isTrashPath("trash/foo.md") {
+	if IsTrashPath("trash/foo.md") {
 		t.Error("trash/foo.md (no leading dot) should not be trash path")
 	}
 }

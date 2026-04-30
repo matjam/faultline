@@ -16,7 +16,14 @@ import (
 
 	"golang.org/x/net/html"
 
+	"github.com/matjam/faultline/internal/adapters/email/imap"
+	"github.com/matjam/faultline/internal/adapters/llm/kobold"
+	"github.com/matjam/faultline/internal/adapters/memory/fs"
+	"github.com/matjam/faultline/internal/adapters/operator/telegram"
+	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
 	"github.com/matjam/faultline/internal/config"
+	"github.com/matjam/faultline/internal/llm"
+	"github.com/matjam/faultline/internal/search/bm25"
 )
 
 // webCacheEntry holds a cached web page fetch result.
@@ -96,11 +103,11 @@ func (c *webCache) Set(url, content string) {
 
 // ToolDefs returns the tool definitions for the OpenAI API.
 // Tools are conditional on what capabilities are available.
-func (te *ToolExecutor) ToolDefs() []Tool {
-	tools := []Tool{
+func (te *ToolExecutor) ToolDefs() []llm.Tool {
+	tools := []llm.Tool{
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "web_fetch",
 				Description: "Fetch a webpage and return its content as readable text. HTML is converted to plain text. Returns a window of text from the page (default 12000 chars). Use offset to read further into the page. Results are cached briefly so repeated calls to the same URL are free.",
 				Parameters: map[string]interface{}{
@@ -124,8 +131,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "wiki_fetch",
 				Description: "Fetch a Wikipedia article as clean plain text via the MediaWiki API. Returns the full article text with no HTML. Use offset to read further into long articles. Set intro=true for just the introduction. Results are cached briefly so repeated calls to the same article are free.",
 				Parameters: map[string]interface{}{
@@ -153,8 +160,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_read",
 				Description: "Read a memory file. Returns a metadata header (file size, last modified, total lines) followed by file content with line numbers. Supports reading a specific range of lines via optional offset and lines parameters.",
 				Parameters: map[string]interface{}{
@@ -178,8 +185,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_write",
 				Description: "Write or update a memory file. Creates parent directories automatically. Returns confirmation with the number of bytes written. Use this to store research, reflections, opinions, and any information you want to persist.",
 				Parameters: map[string]interface{}{
@@ -199,8 +206,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_list",
 				Description: "List files and directories in your memory. Returns one entry per line. Files show: name, size in bytes, and last modified timestamp. Directories show: name, total file count, and total size of all contents. Use '' or '/' for the root directory.",
 				Parameters: map[string]interface{}{
@@ -216,8 +223,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_search",
 				Description: "Search across all memory files by keyword relevance (BM25). Returns up to 5 results, each with: file path, relevance score, and content. Long results are clipped with a hint pointing back at memory_read so you can load the full file. Use this to find memories by topic when you don't know the exact file path. Optionally filter by file modification date.",
 				Parameters: map[string]interface{}{
@@ -241,8 +248,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_delete",
 				Description: "Delete a memory file or directory by moving it to the trash. Deleted files can be restored later with memory_restore. Deleting a directory moves it and ALL of its contents to the trash. Returns confirmation of what was deleted.",
 				Parameters: map[string]interface{}{
@@ -258,8 +265,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_restore",
 				Description: "Restore a previously deleted file or directory from the trash back to its original location. Use memory_list_trash to see what is available to restore.",
 				Parameters: map[string]interface{}{
@@ -275,8 +282,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_list_trash",
 				Description: "List files and directories currently in the trash. These are files that were previously deleted and can be restored with memory_restore. Use '' or '/' for the trash root.",
 				Parameters: map[string]interface{}{
@@ -292,8 +299,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_empty_trash",
 				Description: "Permanently delete ALL files and directories in the trash. This action is irreversible. Use this to free up space when you are sure you no longer need any trashed files.",
 				Parameters: map[string]interface{}{
@@ -303,8 +310,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_move",
 				Description: "Move or rename a memory file or directory. Creates destination parent directories automatically. Returns confirmation with the source and destination paths. Use this to reorganize your memory structure.",
 				Parameters: map[string]interface{}{
@@ -324,8 +331,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_grep",
 				Description: "Search within a single memory file using a regex pattern. Returns matching lines with their line numbers. Use this to find specific content within a large file without reading the whole thing into context.",
 				Parameters: map[string]interface{}{
@@ -345,8 +352,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_edit",
 				Description: "Edit a memory file by finding an exact string and replacing it. The old_string must match exactly (including whitespace and newlines). If the old_string appears multiple times, the operation fails unless replace_all is true. Use memory_read with offset/lines or memory_grep to find the exact text first.",
 				Parameters: map[string]interface{}{
@@ -374,8 +381,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_append",
 				Description: "Append content to the end of a memory file without reading it first. Creates the file if it does not exist. Useful for journals, logs, running lists, and any file you frequently add to.",
 				Parameters: map[string]interface{}{
@@ -395,8 +402,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "memory_insert",
 				Description: "Insert content at a specific line number in a memory file. The new content is inserted before the specified line, pushing existing lines down. If the line number exceeds the file length, content is appended at the end. Use memory_grep to find the target line number first.",
 				Parameters: map[string]interface{}{
@@ -420,8 +427,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "context_status",
 				Description: "Check your current context window usage. Returns: estimated tokens used, maximum token limit, percentage used, and tokens remaining. Use this to decide whether to save information to memory before your context fills up.",
 				Parameters: map[string]interface{}{
@@ -431,8 +438,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "get_time",
 				Description: "Get the current date and time. Returns the time formatted as 'Monday, January 2, 2006 3:04:05 PM MST'.",
 				Parameters: map[string]interface{}{
@@ -442,8 +449,8 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 			},
 		},
 		{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "sleep",
 				Description: fmt.Sprintf("Pause for a number of seconds before your next turn. Useful when waiting on the world (e.g. for an external process, or to space out polling) rather than burning context with idle turns. Operator messages interrupt the sleep immediately, and forced shutdown also wakes it. If a collaborator message is already pending the sleep returns at once. Maximum is %d seconds (%s); larger values are clamped.", int(te.maxSleep.Seconds()), te.maxSleep),
 				Parameters: map[string]interface{}{
@@ -461,9 +468,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 	}
 
 	if te.telegram != nil {
-		tools = append(tools, Tool{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+		tools = append(tools, llm.Tool{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "send_message",
 				Description: "Send a message to your collaborator via Telegram. Use this to share interesting findings, ask questions, report on your progress, or communicate anything you want. Your collaborator may not respond immediately.",
 				Parameters: map[string]interface{}{
@@ -481,9 +488,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 	}
 
 	if te.email != nil {
-		tools = append(tools, Tool{
-			Type: ToolTypeFunction,
-			Function: &FunctionDef{
+		tools = append(tools, llm.Tool{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "email_fetch",
 				Description: "Fetch emails from an IMAP mailbox. Returns email overviews (from, date, subject, size, flags) for recent messages, or full body for a specific UID.",
 				Parameters: map[string]interface{}{
@@ -509,9 +516,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 
 	if te.sandbox != nil {
 		tools = append(tools,
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_write",
 					Description: "Create or overwrite a file in the sandbox. Writes the full file content. Use folder 'scripts' for Python scripts, 'input' for input data, 'output' for output data. All filenames must be lowercase, flat (no subfolders), and contain only [a-z0-9._-].",
 					Parameters: map[string]interface{}{
@@ -535,9 +542,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_read",
 					Description: "Read a file from the sandbox. Returns the file content with line numbers. Use folder 'scripts' for Python scripts, 'input' for input data, 'output' for output data. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -565,9 +572,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_delete",
 					Description: "Delete a file from the sandbox. This is permanent. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -587,9 +594,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_rename",
 					Description: "Rename a file within the same sandbox folder. Both old and new names must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -613,9 +620,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_list",
 					Description: "List all files in a sandbox folder. Returns filename, size, and last modified time for each file. All filenames are lowercase.",
 					Parameters: map[string]interface{}{
@@ -631,9 +638,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_edit",
 					Description: "Edit a sandbox file by finding an exact string and replacing it. The old_string must match exactly (including whitespace and newlines). If old_string appears multiple times, the operation fails unless replace_all is true. Use sandbox_read with offset/lines to find the exact text first. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -665,9 +672,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_append",
 					Description: "Append content to the end of a sandbox file. Creates the file if it does not exist. Useful for building up data files incrementally. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -691,9 +698,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_insert",
 					Description: "Insert content at a specific line number in a sandbox file. Content is inserted before the specified line, pushing existing lines down. If the line number exceeds file length, content is appended at the end. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -721,9 +728,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_execute",
 					Description: "Execute a Python script in the sandbox. The script must exist in the scripts/ folder. Dependencies are synced automatically before execution. The script runs in a Docker container with read-only access to /scripts and /input, and read-write access to /output. Returns combined stdout/stderr output. Output beyond the configured cap is clipped with a hint telling you the full size; for large output, write results to /output/ from your script and read them back with sandbox_read.",
 					Parameters: map[string]interface{}{
@@ -743,9 +750,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_install_package",
 					Description: "Install a Python package into the sandbox environment using uv. The package is added to pyproject.toml and available to all scripts. Example: 'requests', 'pandas>=2.0'.",
 					Parameters: map[string]interface{}{
@@ -760,9 +767,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_upgrade_package",
 					Description: "Upgrade a Python package in the sandbox environment to the latest compatible version.",
 					Parameters: map[string]interface{}{
@@ -777,9 +784,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_remove_package",
 					Description: "Remove a Python package from the sandbox environment. Removes it from pyproject.toml.",
 					Parameters: map[string]interface{}{
@@ -794,9 +801,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_list_packages",
 					Description: "List all Python packages installed in the sandbox environment. Reads from pyproject.toml.",
 					Parameters: map[string]interface{}{
@@ -805,9 +812,9 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 					},
 				},
 			},
-			Tool{
-				Type: ToolTypeFunction,
-				Function: &FunctionDef{
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
 					Name:        "sandbox_shell",
 					Description: "Run an arbitrary shell command inside the sandbox Docker container. Use this to execute commands like git, ls, cat, wc, grep, find, or any other command available in the container. The command runs with the same mounts as sandbox scripts (/scripts read-only, /input read-only, /output read-write). Output beyond the configured cap is clipped with a hint telling you the full size; redirect large output to /output/ and read it back with sandbox_read.",
 					Parameters: map[string]interface{}{
@@ -842,12 +849,12 @@ func indexKey(path string) string {
 
 // ToolExecutor handles executing tool calls.
 type ToolExecutor struct {
-	memory        *MemoryStore
-	index         *SearchIndex
-	telegram      *Telegram
-	sandbox       *Sandbox
+	memory        *fs.Store
+	index         *bm25.Index
+	telegram      *telegram.Bot
+	sandbox       *docker.Sandbox
 	email         *config.EmailConfig
-	kobold        *KoboldExtras // optional; nil means no perf info in context_status
+	kobold        *kobold.Client // optional; nil means no perf info in context_status
 	logger        *slog.Logger
 	http          *http.Client
 	cache         *webCache
@@ -857,18 +864,18 @@ type ToolExecutor struct {
 	maxSleep      time.Duration // upper bound for the `sleep` tool
 }
 
-// NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *config.EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *ToolExecutor {
-	if sandbox != nil {
-		sandbox.SetOutputLimit(limits.SandboxOutputChars)
+// NewToolExecutor creates a new tool executor. kb may be nil.
+func NewToolExecutor(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *ToolExecutor {
+	if sb != nil {
+		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
 	return &ToolExecutor{
 		memory:    memory,
 		index:     index,
-		telegram:  telegram,
-		sandbox:   sandbox,
+		telegram:  tg,
+		sandbox:   sb,
 		email:     email,
-		kobold:    kobold,
+		kobold:    kb,
 		logger:    logger,
 		maxTokens: maxTokens,
 		limits:    limits,
@@ -919,7 +926,7 @@ func (te *ToolExecutor) SetContextInfo(currentTokens int) {
 
 // Execute runs a tool call and returns the result string.
 // ctx is used for operations that need cancellation/timeout (e.g. sandbox Docker commands).
-func (te *ToolExecutor) Execute(ctx context.Context, call ToolCall) string {
+func (te *ToolExecutor) Execute(ctx context.Context, call llm.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
@@ -1538,7 +1545,7 @@ func (te *ToolExecutor) contextStatus() string {
 				te.kobold.Version(),
 				perf.LastInputCount, perf.LastTokenCount,
 				perf.LastProcessTime, perf.LastEvalTime, perf.LastEvalSpd,
-				stopReasonString(perf.StopReason),
+				kobold.StopReasonString(perf.StopReason),
 				perf.TotalGens, perf.Queue,
 				idleStateString(perf.Idle),
 				formatUptime(perf.Uptime),
@@ -1575,6 +1582,53 @@ func formatUptime(seconds int) string {
 		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%ds", seconds)
+}
+
+// emailFetchArgs holds the arguments for the email_fetch tool.
+type emailFetchArgs struct {
+	Folder string `json:"folder"`
+	Limit  int    `json:"limit"`
+	UID    int    `json:"uid"`
+}
+
+// emailFetch fetches recent email overviews or a specific email body from
+// an IMAP mailbox via the imap adapter.
+func (te *ToolExecutor) emailFetch(argsJSON string) string {
+	var args emailFetchArgs
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+
+	if args.Folder == "" {
+		args.Folder = "INBOX"
+	}
+	if args.Limit <= 0 {
+		args.Limit = 10
+	}
+
+	if te.email == nil {
+		return "Error: email is not configured"
+	}
+
+	c, err := imap.New(*te.email, te.logger)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	defer c.Close()
+
+	if args.UID > 0 {
+		body, err := c.FetchBody(args.Folder, args.UID)
+		if err != nil {
+			return fmt.Sprintf("Error: %s", err)
+		}
+		return body
+	}
+
+	result, err := c.FetchOverviews(args.Folder, args.Limit)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return result
 }
 
 func (te *ToolExecutor) sendMessage(argsJSON string) string {

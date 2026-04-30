@@ -1,4 +1,4 @@
-package main
+package kobold
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
 // fakeKobold returns an httptest.Server that mimics the subset of KoboldCpp
@@ -135,7 +137,7 @@ func TestKoboldExtras_Detect(t *testing.T) {
 
 	// Note: we pass the fake server's URL with a /v1 suffix to confirm the
 	// constructor strips it correctly when computing the kcpp root.
-	k := NewKoboldExtras(f.srv.URL+"/v1", quietLogger())
+	k := New(f.srv.URL+"/v1", quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
@@ -158,7 +160,7 @@ func TestKoboldExtras_Detect_NotKobold(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	k := NewKoboldExtras(srv.URL, quietLogger())
+	k := New(srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err == nil {
 		t.Error("expected detection to fail for non-kcpp endpoint")
 	}
@@ -172,7 +174,7 @@ func TestKoboldExtras_Detect_EmptyVersion(t *testing.T) {
 	defer f.Close()
 	f.versionPayload = `{"result":"KoboldCpp","version":""}`
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err == nil {
 		t.Error("expected detection to fail when version field is empty")
 	}
@@ -180,9 +182,9 @@ func TestKoboldExtras_Detect_EmptyVersion(t *testing.T) {
 
 func TestKoboldExtras_CountString_NotDetected(t *testing.T) {
 	// Without Detect() the client must fall back to the heuristic.
-	k := NewKoboldExtras("http://nonexistent.invalid", quietLogger())
+	k := New("http://nonexistent.invalid", quietLogger())
 	if got := k.CountString(context.Background(), "abcd"); got != 1 {
-		t.Errorf("undetected client should fall back to EstimateTokens; got %d, want 1", got)
+		t.Errorf("undetected client should fall back to llm.EstimateTokens; got %d, want 1", got)
 	}
 }
 
@@ -191,7 +193,7 @@ func TestKoboldExtras_CountString(t *testing.T) {
 	defer f.Close()
 	f.tokencountValue = 7
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +209,7 @@ func TestKoboldExtras_CountString_EmptyShortCircuits(t *testing.T) {
 	f := newFakeKobold()
 	defer f.Close()
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +226,7 @@ func TestKoboldExtras_CountString_FallbackOnError(t *testing.T) {
 	defer f.Close()
 	f.failTokencount = true
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -239,25 +241,25 @@ func TestKoboldExtras_CountMessages(t *testing.T) {
 	defer f.Close()
 	f.tokencountValue = 100
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	msgs := []Message{
-		{Role: RoleSystem, Content: "system prompt"},
-		{Role: RoleUser, Content: "hello"},
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "system prompt"},
+		{Role: llm.RoleUser, Content: "hello"},
 		{
-			Role: RoleAssistant,
-			ToolCalls: []ToolCall{{
-				Function: FunctionCall{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				Function: llm.FunctionCall{
 					Name: "f", Arguments: `{"x":1}`,
 				},
 			}},
 		},
 	}
 	got := k.CountMessages(context.Background(), msgs)
-	want := 100 + 3*koboldChatTemplateOverhead
+	want := 100 + 3*chatTemplateOverhead
 	if got != want {
 		t.Errorf("CountMessages = %d, want %d (100 token + 3*overhead)", got, want)
 	}
@@ -272,7 +274,7 @@ func TestKoboldExtras_CountMessages_EmptyAndFallback(t *testing.T) {
 	f.failTokencount = true
 
 	// Detected: empty message log returns 0 without network.
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -281,17 +283,17 @@ func TestKoboldExtras_CountMessages_EmptyAndFallback(t *testing.T) {
 	}
 
 	// Detected with failing tokencount: falls back to heuristic.
-	msgs := []Message{{Content: strings.Repeat("a", 400)}}
-	heuristic := EstimateMessagesTokens(msgs)
+	msgs := []llm.Message{{Content: strings.Repeat("a", 400)}}
+	heuristic := llm.EstimateMessagesTokens(msgs)
 	if got := k.CountMessages(context.Background(), msgs); got != heuristic {
 		t.Errorf("expected fallback to heuristic %d, got %d", heuristic, got)
 	}
 }
 
 func TestKoboldExtras_CountMessages_NotDetected(t *testing.T) {
-	k := NewKoboldExtras("http://nonexistent.invalid", quietLogger())
-	msgs := []Message{{Content: "abcd"}}
-	heuristic := EstimateMessagesTokens(msgs)
+	k := New("http://nonexistent.invalid", quietLogger())
+	msgs := []llm.Message{{Content: "abcd"}}
+	heuristic := llm.EstimateMessagesTokens(msgs)
 	if got := k.CountMessages(context.Background(), msgs); got != heuristic {
 		t.Errorf("undetected client should use heuristic %d, got %d", heuristic, got)
 	}
@@ -301,7 +303,7 @@ func TestKoboldExtras_Abort(t *testing.T) {
 	f := newFakeKobold()
 	defer f.Close()
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +317,7 @@ func TestKoboldExtras_Abort_NotDetected_NoOp(t *testing.T) {
 	f := newFakeKobold()
 	defer f.Close()
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	// Don't call Detect - Abort should be a silent no-op.
 	k.Abort(context.Background())
 	if got := f.abortCalls.Load(); got != 0 {
@@ -327,7 +329,7 @@ func TestKoboldExtras_Perf(t *testing.T) {
 	f := newFakeKobold()
 	defer f.Close()
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +355,7 @@ func TestKoboldExtras_Perf(t *testing.T) {
 }
 
 func TestKoboldExtras_Perf_NotDetected(t *testing.T) {
-	k := NewKoboldExtras("http://nonexistent.invalid", quietLogger())
+	k := New("http://nonexistent.invalid", quietLogger())
 	perf, err := k.Perf(context.Background())
 	if err != nil {
 		t.Errorf("undetected Perf should not error, got %v", err)
@@ -366,7 +368,7 @@ func TestKoboldExtras_Perf_NotDetected(t *testing.T) {
 func TestKoboldExtras_NilSafe(t *testing.T) {
 	// Both Detected() and Version() must tolerate a nil receiver so the
 	// agent can use them without explicit nil checks at every site.
-	var k *KoboldExtras
+	var k *Client
 	if k.Detected() {
 		t.Error("nil Detected() should be false")
 	}
@@ -384,8 +386,8 @@ func TestStopReasonString(t *testing.T) {
 		99: "unknown(99)",
 	}
 	for code, want := range tests {
-		if got := stopReasonString(code); got != want {
-			t.Errorf("stopReasonString(%d) = %q, want %q", code, got, want)
+		if got := StopReasonString(code); got != want {
+			t.Errorf("StopReasonString(%d) = %q, want %q", code, got, want)
 		}
 	}
 }
@@ -399,7 +401,7 @@ func TestKoboldExtras_BaseURLNormalization(t *testing.T) {
 		"http://example.com:5001/v1/",
 	}
 	for _, in := range cases {
-		k := NewKoboldExtras(in, quietLogger())
+		k := New(in, quietLogger())
 		if k.baseURL != "http://example.com:5001" {
 			t.Errorf("input %q -> baseURL %q, want http://example.com:5001", in, k.baseURL)
 		}
@@ -412,7 +414,7 @@ func TestKoboldExtras_TokencountCancelable(t *testing.T) {
 	defer f.Close()
 	f.tokencountDelay = 200 * time.Millisecond
 
-	k := NewKoboldExtras(f.srv.URL, quietLogger())
+	k := New(f.srv.URL, quietLogger())
 	if err := k.Detect(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-package main
+package openai
 
 import (
 	"fmt"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/log"
 )
 
@@ -39,7 +40,7 @@ func NewChatLogger(dir string) (*ChatLogger, error) {
 // lastLoggedAt invariant: only messages new since the previous call are
 // appended. When context is rebuilt (compaction or fresh start) the caller
 // passes start=0 to re-log the full new context.
-func (c *ChatLogger) LogIncoming(messages []Message, start int) {
+func (c *ChatLogger) LogIncoming(messages []llm.Message, start int) {
 	if c == nil {
 		return
 	}
@@ -54,7 +55,7 @@ func (c *ChatLogger) LogIncoming(messages []Message, start int) {
 // LogResponse writes the assistant message that came back from the model,
 // including the finish reason for context (`stop`, `tool_calls`, `length`,
 // etc.). Should be called once per Chat() round-trip.
-func (c *ChatLogger) LogResponse(msg Message, finishReason string) {
+func (c *ChatLogger) LogResponse(msg llm.Message, finishReason string) {
 	if c == nil {
 		return
 	}
@@ -94,7 +95,7 @@ const bannerWidth = 100
 
 // writeMessage formats one message and writes it in a single Write() so
 // concurrent callers don't interleave (log.Daily mutexes its Write).
-func (c *ChatLogger) writeMessage(m Message, finishReason string) {
+func (c *ChatLogger) writeMessage(m llm.Message, finishReason string) {
 	var sb strings.Builder
 	formatMessage(&sb, m, finishReason)
 	_, _ = io.WriteString(c.w, sb.String())
@@ -111,7 +112,7 @@ func (c *ChatLogger) writeMessage(m Message, finishReason string) {
 //	[tool_call] <id> <name>(<json args>)
 //	...
 //	(blank line separator)
-func formatMessage(sb *strings.Builder, m Message, finishReason string) {
+func formatMessage(sb *strings.Builder, m llm.Message, finishReason string) {
 	ts := time.Now().Format("2006-01-02 15:04:05.000")
 	header := fmt.Sprintf("=== %s | %s", ts, m.Role)
 	if finishReason != "" {

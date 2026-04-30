@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matjam/faultline/internal/search/bm25"
 )
 
 func TestBuildCycleContext_NoMemories(t *testing.T) {
@@ -23,7 +25,7 @@ func TestBuildCycleContext_NoMemories(t *testing.T) {
 
 func TestBuildCycleContext_WithMemories(t *testing.T) {
 	now := time.Now()
-	mems := []SearchResult{
+	mems := []bm25.Result{
 		{Path: "alpha.md", Content: "alpha content"},
 		{Path: "beta.md", Content: "beta content"},
 	}
@@ -45,7 +47,7 @@ func TestBuildCycleContext_WithMemories(t *testing.T) {
 
 func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 	long := strings.Repeat("x", 3000)
-	mems := []SearchResult{{Path: "long.md", Content: long}}
+	mems := []bm25.Result{{Path: "long.md", Content: long}}
 	got := BuildCycleContext("SYS", mems, time.Now(), 2000)
 
 	if !strings.Contains(got, "[truncated") {
@@ -67,7 +69,7 @@ func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 
 func TestBuildCycleContext_NoLimitKeepsFullContent(t *testing.T) {
 	long := strings.Repeat("x", 3000)
-	mems := []SearchResult{{Path: "long.md", Content: long}}
+	mems := []bm25.Result{{Path: "long.md", Content: long}}
 	got := BuildCycleContext("SYS", mems, time.Now(), 0)
 
 	if strings.Contains(got, "[truncated") {

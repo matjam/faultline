@@ -1,4 +1,7 @@
-package main
+// Package bm25 is a pure-Go BM25 search index over text documents keyed
+// by string paths. It has no I/O dependencies and is rebuilt from disk on
+// each agent startup. Used as the search backend for the memory adapter.
+package bm25
 
 import (
 	"math"
@@ -6,15 +9,17 @@ import (
 	"unicode"
 )
 
-// SearchResult represents a search hit from the memory index.
-type SearchResult struct {
+// Result represents a search hit from the index. The Score field is
+// populated by Search; for non-scored uses (the memory adapter's
+// RecentFiles, AllFiles) it is left at zero.
+type Result struct {
 	Path    string  `json:"path"`
 	Content string  `json:"content"`
 	Score   float64 `json:"score"`
 }
 
-// SearchIndex implements a BM25-based search index over memory files.
-type SearchIndex struct {
+// Index is a BM25-based search index over text documents.
+type Index struct {
 	// documents maps path -> tokenized content
 	documents map[string][]string
 	// rawContent maps path -> original content
@@ -28,9 +33,9 @@ type SearchIndex struct {
 	b  float64
 }
 
-// NewSearchIndex creates a new empty search index.
-func NewSearchIndex() *SearchIndex {
-	return &SearchIndex{
+// New creates a new empty search index.
+func New() *Index {
+	return &Index{
 		documents:  make(map[string][]string),
 		rawContent: make(map[string]string),
 		docFreqs:   make(map[string]int),
@@ -40,7 +45,7 @@ func NewSearchIndex() *SearchIndex {
 }
 
 // Build rebuilds the index from a set of documents.
-func (idx *SearchIndex) Build(docs map[string]string) {
+func (idx *Index) Build(docs map[string]string) {
 	idx.documents = make(map[string][]string, len(docs))
 	idx.rawContent = make(map[string]string, len(docs))
 	idx.docFreqs = make(map[string]int)
@@ -68,7 +73,7 @@ func (idx *SearchIndex) Build(docs map[string]string) {
 }
 
 // Update adds or updates a single document in the index.
-func (idx *SearchIndex) Update(path, content string) {
+func (idx *Index) Update(path, content string) {
 	// Remove old document frequencies if it existed
 	if oldTokens, exists := idx.documents[path]; exists {
 		seen := make(map[string]bool)
@@ -107,7 +112,7 @@ func (idx *SearchIndex) Update(path, content string) {
 }
 
 // Remove removes a document from the index.
-func (idx *SearchIndex) Remove(path string) {
+func (idx *Index) Remove(path string) {
 	tokens, exists := idx.documents[path]
 	if !exists {
 		return
@@ -141,7 +146,7 @@ func (idx *SearchIndex) Remove(path string) {
 }
 
 // RemovePrefix removes all documents whose path starts with the given prefix.
-func (idx *SearchIndex) RemovePrefix(prefix string) {
+func (idx *Index) RemovePrefix(prefix string) {
 	var toRemove []string
 	for path := range idx.documents {
 		if strings.HasPrefix(path, prefix) {
@@ -157,7 +162,7 @@ func (idx *SearchIndex) RemovePrefix(prefix string) {
 // An optional filter function can be provided to exclude documents before
 // scoring. If filter is non-nil, only documents for which filter(path)
 // returns true are considered.
-func (idx *SearchIndex) Search(query string, maxResults int, filter func(path string) bool) []SearchResult {
+func (idx *Index) Search(query string, maxResults int, filter func(path string) bool) []Result {
 	if len(idx.documents) == 0 {
 		return nil
 	}
@@ -223,10 +228,10 @@ func (idx *SearchIndex) Search(query string, maxResults int, filter func(path st
 		results = results[:maxResults]
 	}
 
-	var out []SearchResult
+	var out []Result
 	for _, r := range results {
 		content := idx.rawContent[r.path]
-		out = append(out, SearchResult{
+		out = append(out, Result{
 			Path:    r.path,
 			Content: content,
 			Score:   r.score,

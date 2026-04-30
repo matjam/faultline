@@ -1,4 +1,4 @@
-package main
+package bm25
 
 import (
 	"reflect"
@@ -64,7 +64,7 @@ func TestTokenize(t *testing.T) {
 }
 
 func TestSearchIndex_EmptyAndQuery(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 
 	if got := idx.Search("anything", 10, nil); got != nil {
 		t.Errorf("empty index Search returned %v, want nil", got)
@@ -80,7 +80,7 @@ func TestSearchIndex_EmptyAndQuery(t *testing.T) {
 }
 
 func TestSearchIndex_RanksByRelevance(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"climate.md":   "climate change is accelerating; warming oceans drive storms",
 		"cooking.md":   "boil water, add pasta, stir frequently",
@@ -97,7 +97,7 @@ func TestSearchIndex_RanksByRelevance(t *testing.T) {
 }
 
 func TestSearchIndex_MaxResults(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	docs := map[string]string{}
 	for i := 'a'; i <= 'e'; i++ {
 		docs[string(i)+".md"] = "shared keyword unique" + string(i)
@@ -111,7 +111,7 @@ func TestSearchIndex_MaxResults(t *testing.T) {
 }
 
 func TestSearchIndex_Filter(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"public/a.md":  "topic apple",
 		"private/b.md": "topic apple",
@@ -129,7 +129,7 @@ func TestSearchIndex_Filter(t *testing.T) {
 }
 
 func TestSearchIndex_UpdateChangesScore(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"a.md": "apple banana",
 		"b.md": "cherry date",
@@ -148,7 +148,7 @@ func TestSearchIndex_UpdateChangesScore(t *testing.T) {
 }
 
 func TestSearchIndex_Remove(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"a.md": "apple banana",
 		"b.md": "apple cherry",
@@ -165,7 +165,7 @@ func TestSearchIndex_Remove(t *testing.T) {
 }
 
 func TestSearchIndex_RemovePrefix(t *testing.T) {
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"trash/a.md": "apple",
 		"trash/b.md": "apple",
@@ -182,7 +182,7 @@ func TestSearchIndex_RemovePrefix(t *testing.T) {
 func TestSearchIndex_DocFreqsCleanedOnRemove(t *testing.T) {
 	// Regression: removing a document must decrement docFreqs so subsequent
 	// IDF calculations don't treat removed terms as still present.
-	idx := NewSearchIndex()
+	idx := New()
 	idx.Build(map[string]string{
 		"a.md": "uniqueterm",
 		"b.md": "uniqueterm",

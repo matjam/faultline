@@ -1,4 +1,4 @@
-package main
+package jsonfile
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
 // captureLogger returns a logger writing to a buffer so tests can both
@@ -19,11 +21,11 @@ func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	return logger, buf
 }
 
-func sampleMessages() []Message {
-	return []Message{
-		{Role: RoleSystem, Content: "you are an agent"},
-		{Role: RoleUser, Content: "hello"},
-		{Role: RoleAssistant, Content: "hi"},
+func sampleMessages() []llm.Message {
+	return []llm.Message{
+		{Role: llm.RoleSystem, Content: "you are an agent"},
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "hi"},
 	}
 }
 
@@ -32,14 +34,14 @@ func TestSaveAndLoadState_Roundtrip(t *testing.T) {
 	path := filepath.Join(dir, "state.json")
 
 	msgs := sampleMessages()
-	if err := SaveState(path, msgs, 7); err != nil {
-		t.Fatalf("SaveState: %v", err)
+	if err := Save(path, msgs, 7); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 
 	logger, _ := captureLogger()
-	got, idle, err := LoadState(path, logger)
+	got, idle, err := Load(path, logger)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if idle != 7 {
 		t.Errorf("idle streak: got %d want 7", idle)
@@ -55,19 +57,19 @@ func TestSaveAndLoadState_Roundtrip(t *testing.T) {
 }
 
 func TestSaveState_EmptyPathIsNoOp(t *testing.T) {
-	if err := SaveState("", sampleMessages(), 0); err != nil {
-		t.Errorf("SaveState with empty path should be no-op, got %v", err)
+	if err := Save("", sampleMessages(), 0); err != nil {
+		t.Errorf("Save with empty path should be no-op, got %v", err)
 	}
 }
 
 func TestLoadState_EmptyPathIsNoOp(t *testing.T) {
 	logger, _ := captureLogger()
-	got, idle, err := LoadState("", logger)
+	got, idle, err := Load("", logger)
 	if err != nil {
-		t.Errorf("LoadState empty path err = %v", err)
+		t.Errorf("Load empty path err = %v", err)
 	}
 	if got != nil || idle != 0 {
-		t.Errorf("LoadState empty path: got messages=%v idle=%d", got, idle)
+		t.Errorf("Load empty path: got messages=%v idle=%d", got, idle)
 	}
 }
 
@@ -76,9 +78,9 @@ func TestLoadState_MissingFileIsFreshStart(t *testing.T) {
 	path := filepath.Join(dir, "no-such-file.json")
 
 	logger, _ := captureLogger()
-	got, idle, err := LoadState(path, logger)
+	got, idle, err := Load(path, logger)
 	if err != nil {
-		t.Errorf("LoadState missing file should not error, got %v", err)
+		t.Errorf("Load missing file should not error, got %v", err)
 	}
 	if got != nil || idle != 0 {
 		t.Errorf("missing file: got messages=%v idle=%d", got, idle)
@@ -93,7 +95,7 @@ func TestLoadState_BadJSONIsQuarantined(t *testing.T) {
 	}
 
 	logger, logBuf := captureLogger()
-	got, _, err := LoadState(path, logger)
+	got, _, err := Load(path, logger)
 	if err != nil {
 		t.Fatalf("expected no error for bad file (quarantined), got %v", err)
 	}
@@ -125,9 +127,9 @@ func TestLoadState_VersionMismatchIsQuarantined(t *testing.T) {
 	}
 
 	logger, logBuf := captureLogger()
-	got, _, err := LoadState(path, logger)
+	got, _, err := Load(path, logger)
 	if err != nil {
-		t.Fatalf("LoadState err = %v", err)
+		t.Fatalf("Load err = %v", err)
 	}
 	if got != nil {
 		t.Errorf("expected nil messages on version mismatch, got %v", got)
@@ -141,18 +143,18 @@ func TestSaveState_AtomicReplacesExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	if err := SaveState(path, sampleMessages(), 1); err != nil {
+	if err := Save(path, sampleMessages(), 1); err != nil {
 		t.Fatal(err)
 	}
-	updated := append(sampleMessages(), Message{
-		Role: RoleUser, Content: "second turn",
+	updated := append(sampleMessages(), llm.Message{
+		Role: llm.RoleUser, Content: "second turn",
 	})
-	if err := SaveState(path, updated, 2); err != nil {
+	if err := Save(path, updated, 2); err != nil {
 		t.Fatal(err)
 	}
 
 	logger, _ := captureLogger()
-	got, idle, err := LoadState(path, logger)
+	got, idle, err := Load(path, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,17 +175,17 @@ func TestSaveState_AtomicReplacesExisting(t *testing.T) {
 }
 
 func TestSanitizeMessages_DropsTrailingUnsatisfiedToolCalls(t *testing.T) {
-	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
-		{Role: RoleUser, Content: "hi"},
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "hi"},
 		{
-			Role: RoleAssistant,
-			ToolCalls: []ToolCall{
-				{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "x"}},
-				{ID: "call_2", Type: ToolTypeFunction, Function: FunctionCall{Name: "y"}},
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "x"}},
+				{ID: "call_2", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "y"}},
 			},
 		},
-		{Role: RoleTool, ToolCallID: "call_1", Content: "result1"},
+		{Role: llm.RoleTool, ToolCallID: "call_1", Content: "result1"},
 		// call_2 never got a tool response -- crash mid-dispatch.
 	}
 	got := sanitizeMessages(msgs)
@@ -193,16 +195,16 @@ func TestSanitizeMessages_DropsTrailingUnsatisfiedToolCalls(t *testing.T) {
 }
 
 func TestSanitizeMessages_KeepsCompleteToolCallTurns(t *testing.T) {
-	msgs := []Message{
-		{Role: RoleSystem, Content: "sys"},
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
 		{
-			Role: RoleAssistant,
-			ToolCalls: []ToolCall{
-				{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "x"}},
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "x"}},
 			},
 		},
-		{Role: RoleTool, ToolCallID: "call_1", Content: "result"},
-		{Role: RoleAssistant, Content: "thanks"},
+		{Role: llm.RoleTool, ToolCallID: "call_1", Content: "result"},
+		{Role: llm.RoleAssistant, Content: "thanks"},
 	}
 	got := sanitizeMessages(msgs)
 	if len(got) != len(msgs) {

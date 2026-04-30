@@ -1,4 +1,6 @@
-package main
+// Package telegram is the Telegram-backed operator adapter for
+// bidirectional collaborator communication.
+package telegram
 
 import (
 	"bytes"
@@ -13,8 +15,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// Telegram manages bidirectional communication with the collaborator.
-type Telegram struct {
+// Bot is a Telegram bot for bidirectional collaborator communication.
+type Bot struct {
 	bot    *tgbotapi.BotAPI
 	chatID int64
 	logger *slog.Logger
@@ -23,9 +25,9 @@ type Telegram struct {
 	pending []string
 }
 
-// NewTelegram creates a new Telegram bot connection.
+// New creates a new Telegram bot connection.
 // Clears any existing webhook so long polling works.
-func NewTelegram(token string, chatID int64, logger *slog.Logger) (*Telegram, error) {
+func New(token string, chatID int64, logger *slog.Logger) (*Bot, error) {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
@@ -42,7 +44,7 @@ func NewTelegram(token string, chatID int64, logger *slog.Logger) (*Telegram, er
 		logger.Debug("cleared any existing webhook")
 	}
 
-	return &Telegram{
+	return &Bot{
 		bot:    bot,
 		chatID: chatID,
 		logger: logger,
@@ -51,7 +53,7 @@ func NewTelegram(token string, chatID int64, logger *slog.Logger) (*Telegram, er
 
 // Start begins listening for incoming messages.
 // It blocks until the context is canceled.
-func (t *Telegram) Start(ctx context.Context) {
+func (t *Bot) Start(ctx context.Context) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
 
@@ -137,7 +139,7 @@ func toTelegramMarkdown(text string) (string, bool) {
 }
 
 // Send sends a text message to the collaborator.
-func (t *Telegram) Send(text string) error {
+func (t *Bot) Send(text string) error {
 	// Telegram has a 4096 character limit per message.
 	// Split long messages.
 	const maxLen = 4000
@@ -189,7 +191,7 @@ func (t *Telegram) Send(text string) error {
 }
 
 // Pending drains and returns all queued incoming messages.
-func (t *Telegram) Pending() []string {
+func (t *Bot) Pending() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -205,7 +207,7 @@ func (t *Telegram) Pending() []string {
 // HasPending reports whether any incoming messages are queued, without
 // draining them. Used by the sleep tool to wake on operator input while
 // leaving the queue intact for the agent loop's normal between-turn drain.
-func (t *Telegram) HasPending() bool {
+func (t *Bot) HasPending() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.pending) > 0

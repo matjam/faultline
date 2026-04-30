@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/log"
 )
@@ -78,9 +79,9 @@ func main() {
 	}()
 
 	// Set up Telegram if configured
-	var tg *Telegram
+	var tg *telegram.Bot
 	if cfg.Telegram.Enabled() {
-		tg, err = NewTelegram(cfg.Telegram.Token, cfg.Telegram.ChatID, logger)
+		tg, err = telegram.New(cfg.Telegram.Token, cfg.Telegram.ChatID, logger)
 		if err != nil {
 			logger.Error("failed to connect telegram bot", "error", err)
 			os.Exit(1)

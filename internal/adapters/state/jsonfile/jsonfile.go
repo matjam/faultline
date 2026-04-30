@@ -1,4 +1,7 @@
-package main
+// Package jsonfile is the conversation-state persistence adapter that
+// writes the message log to a single JSON file with atomic rename-based
+// updates.
+package jsonfile
 
 import (
 	"encoding/json"
@@ -8,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/matjam/faultline/internal/llm"
 )
 
 // stateFileVersion is bumped when the on-disk format changes in a way that
@@ -22,19 +27,19 @@ const stateFileVersion = 1
 // sandbox state are intentionally not persisted -- they are either
 // reconstructible (web cache) or already on disk (sandbox dir).
 type persistedState struct {
-	Version    int       `json:"version"`
-	SavedAt    time.Time `json:"saved_at"`
-	IdleStreak int       `json:"idle_streak"`
-	Messages   []Message `json:"messages"`
+	Version    int           `json:"version"`
+	SavedAt    time.Time     `json:"saved_at"`
+	IdleStreak int           `json:"idle_streak"`
+	Messages   []llm.Message `json:"messages"`
 }
 
-// SaveState writes the current message log to path atomically: write to a
+// Save writes the current message log to path atomically: write to a
 // temp file in the same directory, fsync, rename. The rename is atomic on
 // POSIX, so a crash mid-save leaves either the previous good file or the
 // new good file -- never a half-written one.
 //
 // Path may be empty, in which case this is a no-op (persistence disabled).
-func SaveState(path string, messages []Message, idleStreak int) error {
+func Save(path string, messages []llm.Message, idleStreak int) error {
 	if path == "" {
 		return nil
 	}
@@ -91,7 +96,7 @@ func SaveState(path string, messages []Message, idleStreak int) error {
 	return nil
 }
 
-// LoadState reads a saved state file. Returns (nil, 0, nil) when the file
+// Load reads a saved state file. Returns (nil, 0, nil) when the file
 // does not exist (a fresh start is normal). On parse error or version
 // mismatch, the bad file is renamed aside as state.json.bad-<unix> so it
 // can be inspected, and (nil, 0, nil) is returned -- the daemon comes up
@@ -100,7 +105,7 @@ func SaveState(path string, messages []Message, idleStreak int) error {
 // Returns the messages, the saved idle-streak counter, and any unexpected
 // I/O error. Path may be empty (persistence disabled), in which case this
 // returns (nil, 0, nil).
-func LoadState(path string, logger *slog.Logger) ([]Message, int, error) {
+func Load(path string, logger *slog.Logger) ([]llm.Message, int, error) {
 	if path == "" {
 		return nil, 0, nil
 	}
@@ -160,7 +165,7 @@ func quarantineBadStateFile(path, reason string, logger *slog.Logger) {
 // This is intentionally conservative: we walk from the tail and strip
 // only the trailing partial turn. Anything earlier is assumed valid
 // because top-of-loop saving captures only complete turn boundaries.
-func sanitizeMessages(messages []Message) []Message {
+func sanitizeMessages(messages []llm.Message) []llm.Message {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -171,7 +176,7 @@ func sanitizeMessages(messages []Message) []Message {
 	// onwards.
 	for i := len(messages) - 1; i >= 0; i-- {
 		m := messages[i]
-		if m.Role != RoleAssistant || len(m.ToolCalls) == 0 {
+		if m.Role != llm.RoleAssistant || len(m.ToolCalls) == 0 {
 			continue
 		}
 
@@ -180,7 +185,7 @@ func sanitizeMessages(messages []Message) []Message {
 			needed[tc.ID] = true
 		}
 		for j := i + 1; j < len(messages); j++ {
-			if messages[j].Role == RoleTool {
+			if messages[j].Role == llm.RoleTool {
 				delete(needed, messages[j].ToolCallID)
 			}
 		}
