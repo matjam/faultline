@@ -1,20 +1,19 @@
-package main
+// Package agent is the hexagon: the autonomous agent loop, context
+// compaction, idle-loop detection, and graceful shutdown logic. It
+// depends only on ports defined in this package; concrete adapter
+// implementations are wired up in cmd/faultline/main.go.
+package agent
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
-	"github.com/matjam/faultline/internal/adapters/llm/openai"
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
-	"github.com/matjam/faultline/internal/adapters/operator/telegram"
-	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
-	"github.com/matjam/faultline/internal/adapters/state/jsonfile"
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/llm"
 	prompt "github.com/matjam/faultline/internal/prompts"
@@ -23,117 +22,52 @@ import (
 
 // Agent is the autonomous agent that runs in a continuous loop.
 type Agent struct {
-	cfg      *config.Config
-	llm      *openai.Client
-	memory   *fs.Store
-	index    *bm25.Index
-	tools    *ToolExecutor
-	telegram *telegram.Bot
-	sandbox  *docker.Sandbox
-	kobold   *kobold.Client     // optional; may be nil if backend isn't KoboldCpp
-	chatLog  *openai.ChatLogger // human-readable transcript; closed on shutdown
-	logger   *slog.Logger
+	cfg       *config.Config
+	chat      ChatModel
+	memory    Memory
+	search    Searcher
+	operator  Operator  // nil when no collaborator channel is configured
+	tokenizer Tokenizer // nil when no real tokenizer is detected
+	tools     Tools
+	state     StateStore
+	logger    *slog.Logger
 }
 
-// NewAgent creates and initializes a new agent.
-func NewAgent(cfg *config.Config, tg *telegram.Bot, logger *slog.Logger) (*Agent, error) {
-	memory, err := fs.New(cfg.Agent.MemoryDir)
-	if err != nil {
-		return nil, fmt.Errorf("init memory store: %w", err)
-	}
+// Deps bundles the agent's port dependencies. Constructing the Agent
+// through Deps keeps the call site readable when the parameter list
+// would otherwise grow long.
+type Deps struct {
+	Chat      ChatModel
+	Memory    Memory
+	Search    Searcher
+	Operator  Operator  // optional
+	Tokenizer Tokenizer // optional
+	Tools     Tools
+	State     StateStore
+}
 
-	index := bm25.New()
-
-	// Build initial search index from existing memory files
-	docs, err := memory.AllFiles()
-	if err != nil {
-		logger.Warn("failed to load memory files for indexing", "error", err)
-	} else if len(docs) > 0 {
-		index.Build(docs)
-		logger.Info("search index built", "documents", len(docs))
-	}
-
-	// Set up sandbox if enabled
-	var sb *docker.Sandbox
-	if cfg.Sandbox.Enabled {
-		// Determine working directory for resolving relative paths
-		workDir, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("get working directory: %w", err)
-		}
-		sb, err = docker.New(cfg.Sandbox, workDir, cfg.Log.Dir, logger)
-		if err != nil {
-			return nil, fmt.Errorf("init sandbox: %w", err)
-		}
-		logger.Info("sandbox enabled", "dir", cfg.Sandbox.Dir, "image", cfg.Sandbox.Image)
-	} else {
-		logger.Info("sandbox not configured, Python execution disabled")
-	}
-
-	llmClient := openai.New(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
-
-	// Human-readable chat transcript, separate from the slog debug log.
-	// Failure to open this is non-fatal: we log the error and continue
-	// without a transcript. The slog debug log still has everything, just
-	// in noisy escaped form.
-	chatLog, err := openai.NewChatLogger(cfg.Log.Dir)
-	if err != nil {
-		logger.Warn("could not open chat transcript log; continuing without it",
-			"error", err, "dir", cfg.Log.Dir)
-		chatLog = nil
-	}
-	llmClient.SetChatLog(chatLog)
-
-	// Best-effort detection of KoboldCpp-specific endpoints. If the backend
-	// is anything else (real OpenAI, vLLM, llama.cpp's openai endpoint),
-	// detection fails silently and we keep using the heuristic token count
-	// and skip the abort/perf features. The agent never depends on this.
-	var kb *kobold.Client
-	if cfg.API.KoboldExtras {
-		kb = kobold.New(cfg.API.URL, logger)
-		detectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := kb.Detect(detectCtx); err != nil {
-			logger.Info("kobold extras unavailable, using heuristic token estimates",
-				"error", err)
-			kb = nil
-		}
-		cancel()
-	}
-
-	// Only expose the email_fetch tool when [email] is fully populated.
-	// EmailConfig is a value type, so &cfg.Email is never nil; passing it
-	// unconditionally would advertise email_fetch to the model and fail at
-	// IMAP connect time instead of being cleanly hidden.
-	var email *config.EmailConfig
-	if cfg.Email.Enabled() {
-		email = &cfg.Email
-	}
-
-	executor := NewToolExecutor(memory, index, tg, sb, email, kb, logger, cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
-
+// New constructs an Agent. Any nil-allowed dependency (Operator,
+// Tokenizer) may be left as a nil interface; the agent handles those
+// cases internally with heuristic fallbacks.
+func New(cfg *config.Config, deps Deps, logger *slog.Logger) *Agent {
 	return &Agent{
-		cfg:      cfg,
-		llm:      llmClient,
-		memory:   memory,
-		index:    index,
-		tools:    executor,
-		telegram: tg,
-		sandbox:  sb,
-		kobold:   kb,
-		chatLog:  chatLog,
-		logger:   logger,
-	}, nil
+		cfg:       cfg,
+		chat:      deps.Chat,
+		memory:    deps.Memory,
+		search:    deps.Search,
+		operator:  deps.Operator,
+		tokenizer: deps.Tokenizer,
+		tools:     deps.Tools,
+		state:     deps.State,
+		logger:    logger,
+	}
 }
 
-// Close releases resources held by the agent.
+// Close releases the resources owned by the agent. Adapters whose
+// lifecycles outlive the agent (the Sandbox, ChatLogger, etc.) are
+// closed by the composition root, not here.
 func (a *Agent) Close() {
 	a.tools.Close()
-	if a.sandbox != nil {
-		a.sandbox.Close()
-	}
-	if a.chatLog != nil {
-		_ = a.chatLog.Close()
-	}
 }
 
 // errShutdown is a sentinel error indicating a graceful shutdown was completed.
@@ -176,16 +110,16 @@ func toolMessage(toolCallID, body string) llm.Message {
 }
 
 // countMessageTokens returns the token count for a message log, using the
-// real tokenizer when available (KoboldCpp's /api/extra/tokencount) and
-// falling back to the heuristic otherwise. The kobold path uses a short
-// timeout so a slow/failing tokenizer never wedges the agent loop.
+// real tokenizer when available and falling back to the heuristic
+// otherwise. The tokenizer path uses a short timeout so a slow/failing
+// tokenizer never wedges the agent loop.
 func (a *Agent) countMessageTokens(messages []llm.Message) int {
-	if a.kobold == nil {
+	if a.tokenizer == nil {
 		return llm.EstimateMessagesTokens(messages)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return a.kobold.CountMessages(ctx, messages)
+	return a.tokenizer.CountMessages(ctx, messages)
 }
 
 // chatReq builds a ChatRequest pre-populated with the agent's configured
@@ -211,14 +145,14 @@ func (a *Agent) chatReq(messages []llm.Message, tools []llm.Tool) llm.ChatReques
 // abortInFlight asks the backend to stop any currently-running generation.
 // Best-effort and bounded by a short timeout: the parent context is already
 // canceled (forced shutdown), so we use Background() with our own deadline.
-// No-op when KoboldExtras isn't available.
+// No-op when no Tokenizer is configured.
 func (a *Agent) abortInFlight() {
-	if a.kobold == nil {
+	if a.tokenizer == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	a.kobold.Abort(ctx)
+	a.tokenizer.Abort(ctx)
 }
 
 // logBackendPerf fetches and logs recent backend performance info. Called
@@ -226,16 +160,16 @@ func (a *Agent) abortInFlight() {
 // last_process_time suddenly spikes when the conversation only grew by one
 // short message, the KV cache was invalidated and we want to know.
 //
-// Bounded by a short timeout. No-op when KoboldExtras isn't available, and
+// Bounded by a short timeout. No-op when no Tokenizer is configured, and
 // silently skips on any error so a transient backend hiccup doesn't pollute
 // the logs.
 func (a *Agent) logBackendPerf() {
-	if a.kobold == nil {
+	if a.tokenizer == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	perf, err := a.kobold.Perf(ctx)
+	perf, err := a.tokenizer.Perf(ctx)
 	if err != nil || perf == nil {
 		return
 	}
@@ -353,10 +287,11 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// appends to messages between saves, so length is a sufficient
 		// change detector.
 		//
-		// No-op when state_file is empty. Errors are logged but not
-		// fatal: a transient disk problem should not kill the agent.
-		if a.cfg.Agent.StateFile != "" && (len(messages) != lastSavedLen || idleStreak != lastSavedIdle) {
-			if err := jsonfile.Save(a.cfg.Agent.StateFile, messages, idleStreak); err != nil {
+		// Errors are logged but not fatal: a transient disk problem
+		// should not kill the agent. The StateStore implementation
+		// handles the "persistence disabled" case as a no-op internally.
+		if len(messages) != lastSavedLen || idleStreak != lastSavedIdle {
+			if err := a.state.Save(messages, idleStreak); err != nil {
 				a.logger.Error("save state failed", "error", err)
 			} else {
 				lastSavedLen = len(messages)
@@ -369,7 +304,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// generation off mid-thought wastes tokens and discards the model's
 		// reasoning. Any collaborator messages that arrive during generation
 		// are handled after the response comes back (see below).
-		resp, err := a.llm.Chat(ctx, a.chatReq(messages, toolDefs))
+		resp, err := a.chat.Chat(ctx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			// If the parent context was canceled (forced shutdown via
 			// second SIGINT), return the cancellation error verbatim so
@@ -402,8 +337,8 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// generating. We will handle them at the next available
 		// opportunity rather than mid-generation.
 		var pending []string
-		if a.telegram != nil {
-			pending = a.telegram.Pending()
+		if a.operator != nil {
+			pending = a.operator.Pending()
 		}
 
 		switch {
@@ -484,7 +419,7 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 	// Build search index
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
-		a.index.Build(docs)
+		a.search.Build(docs)
 		a.logger.Info("search index built", "documents", len(docs))
 	}
 
@@ -499,14 +434,14 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 	// system message in a restored state file.
 	memories := a.gatherContextMemories()
 	now := time.Now()
-	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 	systemMsg := llm.Message{
 		Role:    llm.RoleSystem,
 		Content: fullSystemPrompt,
 	}
 
 	// Try to resume from a saved state file.
-	saved, savedIdle, err := jsonfile.Load(a.cfg.Agent.StateFile, a.logger)
+	saved, savedIdle, err := a.state.Load()
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("load state: %w", err)
 	}
@@ -524,7 +459,6 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 		}
 
 		a.logger.Info("context resumed from state file",
-			"path", a.cfg.Agent.StateFile,
 			"messages", len(resumed),
 			"idle_streak", savedIdle,
 			"tokens_est", a.countMessageTokens(resumed))
@@ -575,7 +509,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []llm.Message, tool
 			break
 		}
 
-		resp, err := a.llm.Chat(ctx, a.chatReq(messages, toolDefs))
+		resp, err := a.chat.Chat(ctx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			if ctx.Err() != nil {
 				a.abortInFlight()
@@ -617,7 +551,7 @@ func (a *Agent) rebuildContext(summary string) ([]llm.Message, map[string]string
 	// Rebuild search index in case files changed
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
-		a.index.Build(docs)
+		a.search.Build(docs)
 	}
 
 	// Reload prompts (agent may have modified them)
@@ -629,7 +563,7 @@ func (a *Agent) rebuildContext(summary string) ([]llm.Message, map[string]string
 	// Load fresh memories
 	memories := a.gatherContextMemories()
 	now := time.Now()
-	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: fullSystemPrompt},
@@ -700,11 +634,11 @@ func (a *Agent) gatherContextMemories() []bm25.Result {
 // them to the conversation. Returns the updated messages and whether any
 // were injected.
 func (a *Agent) injectPendingMessages(messages []llm.Message) ([]llm.Message, bool) {
-	if a.telegram == nil {
+	if a.operator == nil {
 		return messages, false
 	}
 
-	pending := a.telegram.Pending()
+	pending := a.operator.Pending()
 	if len(pending) == 0 {
 		return messages, false
 	}
@@ -754,7 +688,7 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []llm.Message, toolDe
 
 	const maxSaveTurns = 10
 	for i := 0; i < maxSaveTurns; i++ {
-		resp, err := a.llm.Chat(saveCtx, a.chatReq(messages, toolDefs))
+		resp, err := a.chat.Chat(saveCtx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			a.logger.Error("LLM call failed during save", "error", err)
 			return errShutdown

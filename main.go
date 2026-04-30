@@ -1,3 +1,6 @@
+// Faultline composition root: parse config, wire concrete adapters into
+// the agent, run the loop. This is the only place in the codebase that
+// knows which adapter implements which port.
 package main
 
 import (
@@ -8,10 +11,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/matjam/faultline/internal/adapters/llm/kobold"
+	"github.com/matjam/faultline/internal/adapters/llm/openai"
+	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
+	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
+	"github.com/matjam/faultline/internal/adapters/state/jsonfile"
+	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/log"
+	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/tools"
 )
 
 func main() {
@@ -24,39 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Console log level from config
-	var consoleLevel slog.Level
-	switch cfg.Log.Level {
-	case "debug":
-		consoleLevel = slog.LevelDebug
-	case "warn":
-		consoleLevel = slog.LevelWarn
-	case "error":
-		consoleLevel = slog.LevelError
-	default:
-		consoleLevel = slog.LevelInfo
-	}
-
-	// Console handler at configured level
-	consoleHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: consoleLevel,
-	})
-
-	// File handler at debug level (always captures everything)
-	fileWriter, err := log.NewDaily(cfg.Log.Dir)
-	if err != nil {
-		slog.Error("failed to create log directory", "dir", cfg.Log.Dir, "error", err)
-		os.Exit(1)
-	}
-	defer fileWriter.Close()
-
-	fileHandler := slog.NewTextHandler(fileWriter, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
-
-	// Combine: console at configured level, file always at debug
-	logger := slog.New(log.NewMultiHandler(consoleHandler, fileHandler))
-	slog.SetDefault(logger)
+	logger := buildLogger(cfg)
 
 	// Two-phase shutdown:
 	//   First SIGINT/SIGTERM  -> close shutdownCh, agent saves state
@@ -78,7 +58,71 @@ func main() {
 		forceCancel()
 	}()
 
-	// Set up Telegram if configured
+	// --- Adapter construction -----------------------------------------
+	// Each adapter is a concrete implementation of an agent port. The
+	// agent struct's only knowledge of these is via the interface.
+
+	memory, err := fs.New(cfg.Agent.MemoryDir)
+	if err != nil {
+		logger.Error("init memory store", "error", err)
+		os.Exit(1)
+	}
+
+	index := bm25.New()
+
+	var sb *docker.Sandbox
+	if cfg.Sandbox.Enabled {
+		workDir, err := os.Getwd()
+		if err != nil {
+			logger.Error("get working directory", "error", err)
+			os.Exit(1)
+		}
+		sb, err = docker.New(cfg.Sandbox, workDir, cfg.Log.Dir, logger)
+		if err != nil {
+			logger.Error("init sandbox", "error", err)
+			os.Exit(1)
+		}
+		defer sb.Close()
+		logger.Info("sandbox enabled", "dir", cfg.Sandbox.Dir, "image", cfg.Sandbox.Image)
+	} else {
+		logger.Info("sandbox not configured, Python execution disabled")
+	}
+
+	chatLog, err := openai.NewChatLogger(cfg.Log.Dir)
+	if err != nil {
+		logger.Warn("could not open chat transcript log; continuing without it",
+			"error", err, "dir", cfg.Log.Dir)
+		chatLog = nil
+	} else {
+		defer chatLog.Close()
+	}
+
+	chat := openai.New(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
+	chat.SetChatLog(chatLog)
+
+	// Best-effort detection of KoboldCpp-specific endpoints. Detection
+	// failure is silent: kb stays nil and the agent falls back to
+	// heuristic estimates plus skips abort/perf. Same instance is shared
+	// between the agent (as a Tokenizer port) and the tools package
+	// (consumed concretely for context_status's perf reporting).
+	var kb *kobold.Client
+	if cfg.API.KoboldExtras {
+		kb = kobold.New(cfg.API.URL, logger)
+		detectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := kb.Detect(detectCtx); err != nil {
+			logger.Info("kobold extras unavailable, using heuristic token estimates",
+				"error", err)
+			kb = nil
+		}
+		cancel()
+	}
+	var tokenizer agent.Tokenizer
+	if kb != nil {
+		tokenizer = kb
+	}
+
+	// Telegram is optional. When disabled, the operator port stays nil.
+	var operator agent.Operator
 	var tg *telegram.Bot
 	if cfg.Telegram.Enabled() {
 		tg, err = telegram.New(cfg.Telegram.Token, cfg.Telegram.ChatID, logger)
@@ -89,19 +133,41 @@ func main() {
 		go tg.Start(ctx)
 		logger.Info("telegram bot enabled", "chat_id", cfg.Telegram.ChatID)
 
-		// Send a startup ping so the collaborator knows the bot is alive
+		// Send a startup ping so the collaborator knows the bot is alive.
 		if err := tg.Send("Agent starting up. I can hear you."); err != nil {
 			logger.Warn("failed to send startup ping", "error", err)
 		}
+		operator = tg
 	} else {
 		logger.Info("telegram not configured, messaging disabled")
 	}
 
-	agent, err := NewAgent(cfg, tg, logger)
-	if err != nil {
-		logger.Error("failed to create agent", "error", err)
-		os.Exit(1)
+	// Email is optional and is only used by the email_fetch tool. The
+	// tool dispatcher constructs short-lived imap.Client instances per
+	// request; a *config.EmailConfig pointer is enough to gate it.
+	var email *config.EmailConfig
+	if cfg.Email.Enabled() {
+		email = &cfg.Email
 	}
+
+	exec := tools.New(memory, index, tg, sb, email, kb, logger,
+		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
+	defer exec.Close()
+
+	state := jsonfile.NewPersister(cfg.Agent.StateFile, logger)
+
+	// --- Agent ---------------------------------------------------------
+
+	a := agent.New(cfg, agent.Deps{
+		Chat:      chat,
+		Memory:    memory,
+		Search:    index,
+		Operator:  operator,
+		Tokenizer: tokenizer,
+		Tools:     exec,
+		State:     state,
+	}, logger)
+	defer a.Close()
 
 	logger.Info("agent starting",
 		"api_url", cfg.API.URL,
@@ -111,12 +177,45 @@ func main() {
 		"compaction_threshold", cfg.Agent.CompactionThreshold,
 	)
 
-	defer agent.Close()
-
-	if err := agent.Run(ctx, shutdownCh); err != nil && !errors.Is(err, context.Canceled) {
+	if err := a.Run(ctx, shutdownCh); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("agent terminated with error", "error", err)
 		os.Exit(1)
 	}
 
 	logger.Info("agent shut down gracefully")
+}
+
+// buildLogger wires a console handler at the configured level alongside a
+// debug-level rotating file handler, so the operator sees a curated stream
+// while the on-disk log captures everything for postmortem inspection.
+func buildLogger(cfg *config.Config) *slog.Logger {
+	var consoleLevel slog.Level
+	switch cfg.Log.Level {
+	case "debug":
+		consoleLevel = slog.LevelDebug
+	case "warn":
+		consoleLevel = slog.LevelWarn
+	case "error":
+		consoleLevel = slog.LevelError
+	default:
+		consoleLevel = slog.LevelInfo
+	}
+
+	consoleHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: consoleLevel,
+	})
+
+	fileWriter, err := log.NewDaily(cfg.Log.Dir)
+	if err != nil {
+		slog.Error("failed to create log directory", "dir", cfg.Log.Dir, "error", err)
+		os.Exit(1)
+	}
+
+	fileHandler := slog.NewTextHandler(fileWriter, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+
+	logger := slog.New(log.NewMultiHandler(consoleHandler, fileHandler))
+	slog.SetDefault(logger)
+	return logger
 }

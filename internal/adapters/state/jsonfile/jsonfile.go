@@ -15,6 +15,31 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 )
 
+// Persister binds a file path and logger so the agent can call Save/Load
+// without re-passing them on each call. Satisfies the agent's StateStore
+// port. An empty path means persistence is disabled; Save and Load
+// become no-ops in that case (matching the underlying functions).
+type Persister struct {
+	Path   string
+	Logger *slog.Logger
+}
+
+// NewPersister returns a Persister wrapping the package-level Save/Load
+// functions with a fixed path and logger.
+func NewPersister(path string, logger *slog.Logger) *Persister {
+	return &Persister{Path: path, Logger: logger}
+}
+
+// Save persists the message log and idle streak to the bound path.
+func (p *Persister) Save(messages []llm.Message, idleStreak int) error {
+	return Save(p.Path, messages, idleStreak)
+}
+
+// Load restores the message log and idle streak from the bound path.
+func (p *Persister) Load() ([]llm.Message, int, error) {
+	return Load(p.Path, p.Logger)
+}
+
 // stateFileVersion is bumped when the on-disk format changes in a way that
 // makes older files unreadable. On mismatch the loader renames the bad
 // file aside and starts fresh rather than refusing to come up.

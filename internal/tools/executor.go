@@ -1,4 +1,8 @@
-package main
+// Package tools holds the tool registry, dispatcher, and per-tool
+// handlers exposed to the LLM. Each tool depends on adapter packages
+// (memory, sandbox, telegram, web HTTP, etc.) directly; the agent depends
+// on the Executor through a port defined in the agent package.
+package tools
 
 import (
 	"context"
@@ -25,6 +29,20 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
 )
+
+// lineCount returns the number of newline-delimited lines in s. A
+// trailing newline does not add an extra line. Used to build retrieval
+// hints for memory_search results.
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
+}
 
 // webCacheEntry holds a cached web page fetch result.
 type webCacheEntry struct {
@@ -103,7 +121,7 @@ func (c *webCache) Set(url, content string) {
 
 // ToolDefs returns the tool definitions for the OpenAI API.
 // Tools are conditional on what capabilities are available.
-func (te *ToolExecutor) ToolDefs() []llm.Tool {
+func (te *Executor) ToolDefs() []llm.Tool {
 	tools := []llm.Tool{
 		{
 			Type: llm.ToolTypeFunction,
@@ -847,8 +865,8 @@ func indexKey(path string) string {
 	return path
 }
 
-// ToolExecutor handles executing tool calls.
-type ToolExecutor struct {
+// Executor handles executing tool calls.
+type Executor struct {
 	memory        *fs.Store
 	index         *bm25.Index
 	telegram      *telegram.Bot
@@ -864,12 +882,12 @@ type ToolExecutor struct {
 	maxSleep      time.Duration // upper bound for the `sleep` tool
 }
 
-// NewToolExecutor creates a new tool executor. kb may be nil.
-func NewToolExecutor(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *ToolExecutor {
+// New creates a new tool executor. kb may be nil.
+func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
 	if sb != nil {
 		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
-	return &ToolExecutor{
+	return &Executor{
 		memory:    memory,
 		index:     index,
 		telegram:  tg,
@@ -893,14 +911,14 @@ func NewToolExecutor(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *
 }
 
 // Close releases resources held by the tool executor.
-func (te *ToolExecutor) Close() {
+func (te *Executor) Close() {
 	te.cache.Close()
 }
 
 // reindexDir re-indexes all .md files under a memory directory path.
 // Used after directory-level operations (delete, move, restore) to keep the
 // search index consistent.
-func (te *ToolExecutor) reindexDir(dirPath string) {
+func (te *Executor) reindexDir(dirPath string) {
 	entries, err := te.memory.List(dirPath)
 	if err != nil {
 		return
@@ -920,13 +938,13 @@ func (te *ToolExecutor) reindexDir(dirPath string) {
 
 // SetContextInfo updates the current token usage estimate.
 // Called by the agent before each batch of tool executions.
-func (te *ToolExecutor) SetContextInfo(currentTokens int) {
+func (te *Executor) SetContextInfo(currentTokens int) {
 	te.currentTokens = currentTokens
 }
 
 // Execute runs a tool call and returns the result string.
 // ctx is used for operations that need cancellation/timeout (e.g. sandbox Docker commands).
-func (te *ToolExecutor) Execute(ctx context.Context, call llm.ToolCall) string {
+func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
@@ -1007,7 +1025,7 @@ func (te *ToolExecutor) Execute(ctx context.Context, call llm.ToolCall) string {
 	}
 }
 
-func (te *ToolExecutor) sandboxShell(ctx context.Context, argsJSON string) string {
+func (te *Executor) sandboxShell(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Command string `json:"command"`
 	}
@@ -1026,7 +1044,7 @@ func (te *ToolExecutor) sandboxShell(ctx context.Context, argsJSON string) strin
 	return output
 }
 
-func (te *ToolExecutor) webFetch(argsJSON string) string {
+func (te *Executor) webFetch(argsJSON string) string {
 	var args struct {
 		URL    string `json:"url"`
 		Offset int    `json:"offset"`
@@ -1122,7 +1140,7 @@ func (te *ToolExecutor) webFetch(argsJSON string) string {
 	return header + "\n\n" + text
 }
 
-func (te *ToolExecutor) memoryRead(argsJSON string) string {
+func (te *Executor) memoryRead(argsJSON string) string {
 	var args struct {
 		Path   string `json:"path"`
 		Offset int    `json:"offset"`
@@ -1150,7 +1168,7 @@ func (te *ToolExecutor) memoryRead(argsJSON string) string {
 	return header + content
 }
 
-func (te *ToolExecutor) memoryWrite(argsJSON string) string {
+func (te *Executor) memoryWrite(argsJSON string) string {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -1177,7 +1195,7 @@ func (te *ToolExecutor) memoryWrite(argsJSON string) string {
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path)
 }
 
-func (te *ToolExecutor) memoryList(argsJSON string) string {
+func (te *Executor) memoryList(argsJSON string) string {
 	var args struct {
 		Directory string `json:"directory"`
 	}
@@ -1234,7 +1252,7 @@ func formatBytes(b int64) string {
 	}
 }
 
-func (te *ToolExecutor) memorySearch(argsJSON string) string {
+func (te *Executor) memorySearch(argsJSON string) string {
 	var args struct {
 		Query          string `json:"query"`
 		ModifiedAfter  string `json:"modified_after"`
@@ -1298,7 +1316,7 @@ func (te *ToolExecutor) memorySearch(argsJSON string) string {
 		if limit > 0 && total > limit {
 			content = content[:limit]
 			tail = fmt.Sprintf("\n[truncated: showing first %d of %d chars; call memory_read with path=%q to read the full file, or with offset=%d to continue from where this preview ends]",
-				limit, total, r.Path, lineCountFor(content)+1)
+				limit, total, r.Path, lineCount(content)+1)
 		}
 		fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s%s\n\n",
 			i+1, r.Path, r.Score, content, tail)
@@ -1307,7 +1325,7 @@ func (te *ToolExecutor) memorySearch(argsJSON string) string {
 	return sb.String()
 }
 
-func (te *ToolExecutor) memoryDelete(argsJSON string) string {
+func (te *Executor) memoryDelete(argsJSON string) string {
 	var args struct {
 		Path string `json:"path"`
 	}
@@ -1341,7 +1359,7 @@ func (te *ToolExecutor) memoryDelete(argsJSON string) string {
 	return fmt.Sprintf("Deleted file '%s' (moved to trash; use memory_restore to recover).", args.Path)
 }
 
-func (te *ToolExecutor) memoryRestore(argsJSON string) string {
+func (te *Executor) memoryRestore(argsJSON string) string {
 	var args struct {
 		Path string `json:"path"`
 	}
@@ -1373,7 +1391,7 @@ func (te *ToolExecutor) memoryRestore(argsJSON string) string {
 	return fmt.Sprintf("Restored '%s' from trash.", restoredPath)
 }
 
-func (te *ToolExecutor) memoryListTrash(argsJSON string) string {
+func (te *Executor) memoryListTrash(argsJSON string) string {
 	var args struct {
 		Directory string `json:"directory"`
 	}
@@ -1406,7 +1424,7 @@ func (te *ToolExecutor) memoryListTrash(argsJSON string) string {
 	return sb.String()
 }
 
-func (te *ToolExecutor) memoryEmptyTrash() string {
+func (te *Executor) memoryEmptyTrash() string {
 	if err := te.memory.EmptyTrash(); err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
@@ -1415,7 +1433,7 @@ func (te *ToolExecutor) memoryEmptyTrash() string {
 	return "Trash has been permanently emptied. All trashed files are gone."
 }
 
-func (te *ToolExecutor) memoryMove(argsJSON string) string {
+func (te *Executor) memoryMove(argsJSON string) string {
 	var args struct {
 		Source      string `json:"source"`
 		Destination string `json:"destination"`
@@ -1461,7 +1479,7 @@ func (te *ToolExecutor) memoryMove(argsJSON string) string {
 	return fmt.Sprintf("Moved '%s' to '%s'.", args.Source, args.Destination)
 }
 
-func (te *ToolExecutor) memoryGrep(argsJSON string) string {
+func (te *Executor) memoryGrep(argsJSON string) string {
 	var args struct {
 		Path    string `json:"path"`
 		Pattern string `json:"pattern"`
@@ -1499,7 +1517,7 @@ func (te *ToolExecutor) memoryGrep(argsJSON string) string {
 	return sb.String()
 }
 
-func (te *ToolExecutor) contextStatus() string {
+func (te *Executor) contextStatus() string {
 	used := te.currentTokens
 	max := te.maxTokens
 	if max == 0 {
@@ -1593,7 +1611,7 @@ type emailFetchArgs struct {
 
 // emailFetch fetches recent email overviews or a specific email body from
 // an IMAP mailbox via the imap adapter.
-func (te *ToolExecutor) emailFetch(argsJSON string) string {
+func (te *Executor) emailFetch(argsJSON string) string {
 	var args emailFetchArgs
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Error parsing arguments: %s", err)
@@ -1631,7 +1649,7 @@ func (te *ToolExecutor) emailFetch(argsJSON string) string {
 	return result
 }
 
-func (te *ToolExecutor) sendMessage(argsJSON string) string {
+func (te *Executor) sendMessage(argsJSON string) string {
 	var args struct {
 		Text string `json:"text"`
 	}
@@ -1667,7 +1685,7 @@ func (te *ToolExecutor) sendMessage(argsJSON string) string {
 // Polling at 500ms is intentional: minute-scale sleeps don't care about
 // sub-second wake latency, and avoiding a notify channel keeps the
 // Telegram surface area small.
-func (te *ToolExecutor) sleep(ctx context.Context, argsJSON string) string {
+func (te *Executor) sleep(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Seconds int `json:"seconds"`
 	}
@@ -1734,7 +1752,7 @@ func (te *ToolExecutor) sleep(ctx context.Context, argsJSON string) string {
 	}
 }
 
-func (te *ToolExecutor) memoryEdit(argsJSON string) string {
+func (te *Executor) memoryEdit(argsJSON string) string {
 	var args struct {
 		Path       string `json:"path"`
 		OldString  string `json:"old_string"`
@@ -1770,7 +1788,7 @@ func (te *ToolExecutor) memoryEdit(argsJSON string) string {
 	return fmt.Sprintf("Replaced %d occurrences in %s.", count, args.Path)
 }
 
-func (te *ToolExecutor) memoryAppend(argsJSON string) string {
+func (te *Executor) memoryAppend(argsJSON string) string {
 	var args struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -1800,7 +1818,7 @@ func (te *ToolExecutor) memoryAppend(argsJSON string) string {
 	return fmt.Sprintf("Appended %d bytes to %s.", len(args.Content), args.Path)
 }
 
-func (te *ToolExecutor) memoryInsert(argsJSON string) string {
+func (te *Executor) memoryInsert(argsJSON string) string {
 	var args struct {
 		Path    string `json:"path"`
 		Line    int    `json:"line"`
@@ -1839,7 +1857,7 @@ func (te *ToolExecutor) memoryInsert(argsJSON string) string {
 // Sandbox tool handlers
 // ---------------------------------------------------------------------------
 
-func (te *ToolExecutor) sandboxWrite(argsJSON string) string {
+func (te *Executor) sandboxWrite(argsJSON string) string {
 	var args struct {
 		Folder   string `json:"folder"`
 		Filename string `json:"filename"`
@@ -1857,7 +1875,7 @@ func (te *ToolExecutor) sandboxWrite(argsJSON string) string {
 	return fmt.Sprintf("Successfully wrote %d bytes to %s/%s", len(args.Content), args.Folder, args.Filename)
 }
 
-func (te *ToolExecutor) sandboxRead(argsJSON string) string {
+func (te *Executor) sandboxRead(argsJSON string) string {
 	var args struct {
 		Folder   string `json:"folder"`
 		Filename string `json:"filename"`
@@ -1877,7 +1895,7 @@ func (te *ToolExecutor) sandboxRead(argsJSON string) string {
 	return content
 }
 
-func (te *ToolExecutor) sandboxDelete(argsJSON string) string {
+func (te *Executor) sandboxDelete(argsJSON string) string {
 	var args struct {
 		Folder   string `json:"folder"`
 		Filename string `json:"filename"`
@@ -1894,7 +1912,7 @@ func (te *ToolExecutor) sandboxDelete(argsJSON string) string {
 	return fmt.Sprintf("Deleted %s/%s", args.Folder, args.Filename)
 }
 
-func (te *ToolExecutor) sandboxRename(argsJSON string) string {
+func (te *Executor) sandboxRename(argsJSON string) string {
 	var args struct {
 		Folder  string `json:"folder"`
 		OldName string `json:"old_name"`
@@ -1912,7 +1930,7 @@ func (te *ToolExecutor) sandboxRename(argsJSON string) string {
 	return fmt.Sprintf("Renamed %s/%s to %s/%s", args.Folder, args.OldName, args.Folder, args.NewName)
 }
 
-func (te *ToolExecutor) sandboxList(argsJSON string) string {
+func (te *Executor) sandboxList(argsJSON string) string {
 	var args struct {
 		Folder string `json:"folder"`
 	}
@@ -1937,7 +1955,7 @@ func (te *ToolExecutor) sandboxList(argsJSON string) string {
 	return sb.String()
 }
 
-func (te *ToolExecutor) sandboxEdit(argsJSON string) string {
+func (te *Executor) sandboxEdit(argsJSON string) string {
 	var args struct {
 		Folder     string `json:"folder"`
 		Filename   string `json:"filename"`
@@ -1964,7 +1982,7 @@ func (te *ToolExecutor) sandboxEdit(argsJSON string) string {
 	return fmt.Sprintf("Replaced %d occurrences in %s/%s.", count, args.Folder, args.Filename)
 }
 
-func (te *ToolExecutor) sandboxAppend(argsJSON string) string {
+func (te *Executor) sandboxAppend(argsJSON string) string {
 	var args struct {
 		Folder   string `json:"folder"`
 		Filename string `json:"filename"`
@@ -1985,7 +2003,7 @@ func (te *ToolExecutor) sandboxAppend(argsJSON string) string {
 	return fmt.Sprintf("Appended %d bytes to %s/%s.", len(args.Content), args.Folder, args.Filename)
 }
 
-func (te *ToolExecutor) sandboxInsert(argsJSON string) string {
+func (te *Executor) sandboxInsert(argsJSON string) string {
 	var args struct {
 		Folder   string `json:"folder"`
 		Filename string `json:"filename"`
@@ -2011,7 +2029,7 @@ func (te *ToolExecutor) sandboxInsert(argsJSON string) string {
 	return fmt.Sprintf("Inserted content at line %d in %s/%s. File now has %d lines.", args.Line, args.Folder, args.Filename, newTotal)
 }
 
-func (te *ToolExecutor) sandboxExecute(ctx context.Context, argsJSON string) string {
+func (te *Executor) sandboxExecute(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Script string   `json:"script"`
 		Args   []string `json:"args"`
@@ -2029,7 +2047,7 @@ func (te *ToolExecutor) sandboxExecute(ctx context.Context, argsJSON string) str
 	return output
 }
 
-func (te *ToolExecutor) sandboxInstallPackage(ctx context.Context, argsJSON string) string {
+func (te *Executor) sandboxInstallPackage(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Package string `json:"package"`
 	}
@@ -2046,7 +2064,7 @@ func (te *ToolExecutor) sandboxInstallPackage(ctx context.Context, argsJSON stri
 	return fmt.Sprintf("Package installed successfully.\n%s", output)
 }
 
-func (te *ToolExecutor) sandboxUpgradePackage(ctx context.Context, argsJSON string) string {
+func (te *Executor) sandboxUpgradePackage(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Package string `json:"package"`
 	}
@@ -2063,7 +2081,7 @@ func (te *ToolExecutor) sandboxUpgradePackage(ctx context.Context, argsJSON stri
 	return fmt.Sprintf("Package upgraded successfully.\n%s", output)
 }
 
-func (te *ToolExecutor) sandboxRemovePackage(ctx context.Context, argsJSON string) string {
+func (te *Executor) sandboxRemovePackage(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Package string `json:"package"`
 	}
@@ -2080,7 +2098,7 @@ func (te *ToolExecutor) sandboxRemovePackage(ctx context.Context, argsJSON strin
 	return fmt.Sprintf("Package removed successfully.\n%s", output)
 }
 
-func (te *ToolExecutor) sandboxListPackages() string {
+func (te *Executor) sandboxListPackages() string {
 	if te.sandbox == nil {
 		return "Error: sandbox is not enabled"
 	}
