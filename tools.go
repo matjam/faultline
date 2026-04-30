@@ -124,6 +124,35 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 		{
 			Type: ToolTypeFunction,
 			Function: &FunctionDef{
+				Name:        "wiki_fetch",
+				Description: "Fetch a Wikipedia article as clean plain text via the MediaWiki API. Returns the full article text with no HTML. Use offset to read further into long articles. Set intro=true for just the introduction. Results are cached briefly so repeated calls to the same article are free.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"title": map[string]interface{}{
+							"type":        "string",
+							"description": "The Wikipedia article title (e.g., 'Enactivism', 'Quantum computing').",
+						},
+						"offset": map[string]interface{}{
+							"type":        "integer",
+							"description": "Character offset to start reading from. Defaults to 0 (start of article). Use this to paginate through long articles.",
+						},
+						"length": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of characters to return. Defaults to 12000.",
+						},
+						"intro": map[string]interface{}{
+							"type":        "boolean",
+							"description": "If true, only fetch the introductory section. Defaults to false (full article).",
+						},
+					},
+					"required": []string{"title"},
+				},
+			},
+		},
+		{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_read",
 				Description: "Read a memory file. Returns a metadata header (file size, last modified, total lines) followed by file content with line numbers. Supports reading a specific range of lines via optional offset and lines parameters.",
 				Parameters: map[string]interface{}{
@@ -427,6 +456,33 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 						},
 					},
 					"required": []string{"text"},
+				},
+			},
+		})
+	}
+
+	if te.email != nil {
+		tools = append(tools, Tool{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
+				Name:        "email_fetch",
+				Description: "Fetch emails from an IMAP mailbox. Returns email overviews (from, date, subject, size, flags) for recent messages, or full body for a specific UID.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"folder": map[string]interface{}{
+							"type":        "string",
+							"description": "Mailbox folder to read from (default: INBOX).",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of emails to fetch (default: 10).",
+						},
+						"uid": map[string]interface{}{
+							"type":        "integer",
+							"description": "If set, fetch full body of this specific email UID instead of recent overviews.",
+						},
+					},
 				},
 			},
 		})
@@ -771,6 +827,7 @@ type ToolExecutor struct {
 	index         *SearchIndex
 	telegram      *Telegram
 	sandbox       *Sandbox
+	email         *EmailConfig
 	kobold        *KoboldExtras // optional; nil means no perf info in context_status
 	logger        *slog.Logger
 	http          *http.Client
@@ -781,7 +838,7 @@ type ToolExecutor struct {
 }
 
 // NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
 	if sandbox != nil {
 		sandbox.SetOutputLimit(limits.SandboxOutputChars)
 	}
@@ -790,6 +847,7 @@ func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram
 		index:     index,
 		telegram:  telegram,
 		sandbox:   sandbox,
+		email:     email,
 		kobold:    kobold,
 		logger:    logger,
 		maxTokens: maxTokens,
@@ -849,6 +907,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, call ToolCall) string {
 	switch name {
 	case "web_fetch":
 		return te.webFetch(args)
+	case "wiki_fetch":
+		return te.wikiFetch(args)
 	case "memory_read":
 		return te.memoryRead(args)
 	case "memory_write":
@@ -881,6 +941,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, call ToolCall) string {
 		return time.Now().Format("Monday, January 2, 2006 3:04:05 PM MST")
 	case "send_message":
 		return te.sendMessage(args)
+	case "email_fetch":
+		return te.emailFetch(args)
 	// Sandbox tools
 	case "sandbox_write":
 		return te.sandboxWrite(args)
