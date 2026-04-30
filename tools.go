@@ -433,6 +433,33 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 		})
 	}
 
+	if te.email != nil {
+		tools = append(tools, openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        "email_fetch",
+				Description: "Fetch emails from an IMAP mailbox. Returns email overviews (from, date, subject, size, flags) for recent messages, or full body for a specific UID.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"folder": map[string]interface{}{
+							"type":        "string",
+							"description": "Mailbox folder to read from (default: INBOX).",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of emails to fetch (default: 10).",
+						},
+						"uid": map[string]interface{}{
+							"type":        "integer",
+							"description": "If set, fetch full body of this specific email UID instead of recent overviews.",
+						},
+					},
+				},
+			},
+		})
+	}
+
 	if te.sandbox != nil {
 		tools = append(tools,
 			openai.Tool{
@@ -772,6 +799,7 @@ type ToolExecutor struct {
 	index         *SearchIndex
 	telegram      *Telegram
 	sandbox       *Sandbox
+	email         *EmailConfig
 	kobold        *KoboldExtras // optional; nil means no perf info in context_status
 	logger        *slog.Logger
 	http          *http.Client
@@ -782,7 +810,7 @@ type ToolExecutor struct {
 }
 
 // NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
 	if sandbox != nil {
 		sandbox.SetOutputLimit(limits.SandboxOutputChars)
 	}
@@ -791,6 +819,7 @@ func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram
 		index:     index,
 		telegram:  telegram,
 		sandbox:   sandbox,
+		email:     email,
 		kobold:    kobold,
 		logger:    logger,
 		maxTokens: maxTokens,
@@ -882,6 +911,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, call openai.ToolCall) strin
 		return time.Now().Format("Monday, January 2, 2006 3:04:05 PM MST")
 	case "send_message":
 		return te.sendMessage(args)
+	case "email_fetch":
+		return te.emailFetch(args)
 	// Sandbox tools
 	case "sandbox_write":
 		return te.sandboxWrite(args)

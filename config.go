@@ -15,6 +15,7 @@ type Config struct {
 	Telegram TelegramConfig `toml:"telegram"`
 	Log      LogConfig      `toml:"log"`
 	Sandbox  SandboxConfig  `toml:"sandbox"`
+	Email    EmailConfig    `toml:"email"`
 	Limits   LimitsConfig   `toml:"limits"`
 }
 
@@ -96,6 +97,19 @@ type LimitsConfig struct {
 // Enabled returns true if Telegram is configured.
 func (t TelegramConfig) Enabled() bool {
 	return t.Token != "" && t.ChatID != 0
+}
+
+// EmailConfig holds optional IMAP email connection settings.
+type EmailConfig struct {
+	Host     string `toml:"host"`
+	Port     int    `toml:"port"`
+	User     string `toml:"user"`
+	Password string `toml:"password"`
+}
+
+// Enabled returns true if Email is configured.
+func (e EmailConfig) Enabled() bool {
+	return e.Host != "" && e.User != "" && e.Password != ""
 }
 
 // duration is a wrapper around time.Duration that supports TOML string unmarshaling.

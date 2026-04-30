@@ -78,7 +78,7 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 		cancel()
 	}
 
-	executor := NewToolExecutor(memory, index, telegram, sandbox, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits)
+	executor := NewToolExecutor(memory, index, telegram, sandbox, &cfg.Email, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits)
 
 	return &Agent{
 		cfg:      cfg,
