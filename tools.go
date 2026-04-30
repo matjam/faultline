@@ -125,6 +125,35 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 		{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
+				Name:        "wiki_fetch",
+				Description: "Fetch a Wikipedia article as clean plain text via the MediaWiki API. Returns the full article text with no HTML. Use offset to read further into long articles. Set intro=true for just the introduction. Results are cached briefly so repeated calls to the same article are free.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"title": map[string]interface{}{
+							"type":        "string",
+							"description": "The Wikipedia article title (e.g., 'Enactivism', 'Quantum computing').",
+						},
+						"offset": map[string]interface{}{
+							"type":        "integer",
+							"description": "Character offset to start reading from. Defaults to 0 (start of article). Use this to paginate through long articles.",
+						},
+						"length": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of characters to return. Defaults to 12000.",
+						},
+						"intro": map[string]interface{}{
+							"type":        "boolean",
+							"description": "If true, only fetch the introductory section. Defaults to false (full article).",
+						},
+					},
+					"required": []string{"title"},
+				},
+			},
+		},
+		{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
 				Name:        "memory_read",
 				Description: "Read a memory file. Returns a metadata header (file size, last modified, total lines) followed by file content with line numbers. Supports reading a specific range of lines via optional offset and lines parameters.",
 				Parameters: map[string]interface{}{
@@ -879,6 +908,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, call openai.ToolCall) strin
 	switch name {
 	case "web_fetch":
 		return te.webFetch(args)
+	case "wiki_fetch":
+		return te.wikiFetch(args)
 	case "memory_read":
 		return te.memoryRead(args)
 	case "memory_write":
