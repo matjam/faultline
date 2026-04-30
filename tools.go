@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	openai "github.com/sashabaranov/go-openai"
 	"golang.org/x/net/html"
 )
 
@@ -95,11 +94,11 @@ func (c *webCache) Set(url, content string) {
 
 // ToolDefs returns the tool definitions for the OpenAI API.
 // Tools are conditional on what capabilities are available.
-func (te *ToolExecutor) ToolDefs() []openai.Tool {
-	tools := []openai.Tool{
+func (te *ToolExecutor) ToolDefs() []Tool {
+	tools := []Tool{
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "web_fetch",
 				Description: "Fetch a webpage and return its content as readable text. HTML is converted to plain text. Returns a window of text from the page (default 12000 chars). Use offset to read further into the page. Results are cached briefly so repeated calls to the same URL are free.",
 				Parameters: map[string]interface{}{
@@ -123,8 +122,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_read",
 				Description: "Read a memory file. Returns a metadata header (file size, last modified, total lines) followed by file content with line numbers. Supports reading a specific range of lines via optional offset and lines parameters.",
 				Parameters: map[string]interface{}{
@@ -148,8 +147,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_write",
 				Description: "Write or update a memory file. Creates parent directories automatically. Returns confirmation with the number of bytes written. Use this to store research, reflections, opinions, and any information you want to persist.",
 				Parameters: map[string]interface{}{
@@ -169,8 +168,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_list",
 				Description: "List files and directories in your memory. Returns one entry per line. Files show: name, size in bytes, and last modified timestamp. Directories show: name, total file count, and total size of all contents. Use '' or '/' for the root directory.",
 				Parameters: map[string]interface{}{
@@ -186,8 +185,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_search",
 				Description: "Search across all memory files by keyword relevance (BM25). Returns up to 5 results, each with: file path, relevance score, and content. Long results are clipped with a hint pointing back at memory_read so you can load the full file. Use this to find memories by topic when you don't know the exact file path. Optionally filter by file modification date.",
 				Parameters: map[string]interface{}{
@@ -211,8 +210,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_delete",
 				Description: "Delete a memory file or directory by moving it to the trash. Deleted files can be restored later with memory_restore. Deleting a directory moves it and ALL of its contents to the trash. Returns confirmation of what was deleted.",
 				Parameters: map[string]interface{}{
@@ -228,8 +227,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_restore",
 				Description: "Restore a previously deleted file or directory from the trash back to its original location. Use memory_list_trash to see what is available to restore.",
 				Parameters: map[string]interface{}{
@@ -245,8 +244,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_list_trash",
 				Description: "List files and directories currently in the trash. These are files that were previously deleted and can be restored with memory_restore. Use '' or '/' for the trash root.",
 				Parameters: map[string]interface{}{
@@ -262,8 +261,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_empty_trash",
 				Description: "Permanently delete ALL files and directories in the trash. This action is irreversible. Use this to free up space when you are sure you no longer need any trashed files.",
 				Parameters: map[string]interface{}{
@@ -273,8 +272,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_move",
 				Description: "Move or rename a memory file or directory. Creates destination parent directories automatically. Returns confirmation with the source and destination paths. Use this to reorganize your memory structure.",
 				Parameters: map[string]interface{}{
@@ -294,8 +293,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_grep",
 				Description: "Search within a single memory file using a regex pattern. Returns matching lines with their line numbers. Use this to find specific content within a large file without reading the whole thing into context.",
 				Parameters: map[string]interface{}{
@@ -315,8 +314,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_edit",
 				Description: "Edit a memory file by finding an exact string and replacing it. The old_string must match exactly (including whitespace and newlines). If the old_string appears multiple times, the operation fails unless replace_all is true. Use memory_read with offset/lines or memory_grep to find the exact text first.",
 				Parameters: map[string]interface{}{
@@ -344,8 +343,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_append",
 				Description: "Append content to the end of a memory file without reading it first. Creates the file if it does not exist. Useful for journals, logs, running lists, and any file you frequently add to.",
 				Parameters: map[string]interface{}{
@@ -365,8 +364,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "memory_insert",
 				Description: "Insert content at a specific line number in a memory file. The new content is inserted before the specified line, pushing existing lines down. If the line number exceeds the file length, content is appended at the end. Use memory_grep to find the target line number first.",
 				Parameters: map[string]interface{}{
@@ -390,8 +389,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "context_status",
 				Description: "Check your current context window usage. Returns: estimated tokens used, maximum token limit, percentage used, and tokens remaining. Use this to decide whether to save information to memory before your context fills up.",
 				Parameters: map[string]interface{}{
@@ -401,8 +400,8 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 			},
 		},
 		{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "get_time",
 				Description: "Get the current date and time. Returns the time formatted as 'Monday, January 2, 2006 3:04:05 PM MST'.",
 				Parameters: map[string]interface{}{
@@ -414,9 +413,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 	}
 
 	if te.telegram != nil {
-		tools = append(tools, openai.Tool{
-			Type: openai.ToolTypeFunction,
-			Function: &openai.FunctionDefinition{
+		tools = append(tools, Tool{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
 				Name:        "send_message",
 				Description: "Send a message to your collaborator via Telegram. Use this to share interesting findings, ask questions, report on your progress, or communicate anything you want. Your collaborator may not respond immediately.",
 				Parameters: map[string]interface{}{
@@ -435,9 +434,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 
 	if te.sandbox != nil {
 		tools = append(tools,
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_write",
 					Description: "Create or overwrite a file in the sandbox. Writes the full file content. Use folder 'scripts' for Python scripts, 'input' for input data, 'output' for output data. All filenames must be lowercase, flat (no subfolders), and contain only [a-z0-9._-].",
 					Parameters: map[string]interface{}{
@@ -461,9 +460,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_read",
 					Description: "Read a file from the sandbox. Returns the file content with line numbers. Use folder 'scripts' for Python scripts, 'input' for input data, 'output' for output data. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -491,9 +490,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_delete",
 					Description: "Delete a file from the sandbox. This is permanent. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -513,9 +512,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_rename",
 					Description: "Rename a file within the same sandbox folder. Both old and new names must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -539,9 +538,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_list",
 					Description: "List all files in a sandbox folder. Returns filename, size, and last modified time for each file. All filenames are lowercase.",
 					Parameters: map[string]interface{}{
@@ -557,9 +556,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_edit",
 					Description: "Edit a sandbox file by finding an exact string and replacing it. The old_string must match exactly (including whitespace and newlines). If old_string appears multiple times, the operation fails unless replace_all is true. Use sandbox_read with offset/lines to find the exact text first. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -591,9 +590,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_append",
 					Description: "Append content to the end of a sandbox file. Creates the file if it does not exist. Useful for building up data files incrementally. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -617,9 +616,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_insert",
 					Description: "Insert content at a specific line number in a sandbox file. Content is inserted before the specified line, pushing existing lines down. If the line number exceeds file length, content is appended at the end. All filenames must be lowercase.",
 					Parameters: map[string]interface{}{
@@ -647,9 +646,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_execute",
 					Description: "Execute a Python script in the sandbox. The script must exist in the scripts/ folder. Dependencies are synced automatically before execution. The script runs in a Docker container with read-only access to /scripts and /input, and read-write access to /output. Returns combined stdout/stderr output. Output beyond the configured cap is clipped with a hint telling you the full size; for large output, write results to /output/ from your script and read them back with sandbox_read.",
 					Parameters: map[string]interface{}{
@@ -669,9 +668,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_install_package",
 					Description: "Install a Python package into the sandbox environment using uv. The package is added to pyproject.toml and available to all scripts. Example: 'requests', 'pandas>=2.0'.",
 					Parameters: map[string]interface{}{
@@ -686,9 +685,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_upgrade_package",
 					Description: "Upgrade a Python package in the sandbox environment to the latest compatible version.",
 					Parameters: map[string]interface{}{
@@ -703,9 +702,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_remove_package",
 					Description: "Remove a Python package from the sandbox environment. Removes it from pyproject.toml.",
 					Parameters: map[string]interface{}{
@@ -720,9 +719,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_list_packages",
 					Description: "List all Python packages installed in the sandbox environment. Reads from pyproject.toml.",
 					Parameters: map[string]interface{}{
@@ -731,9 +730,9 @@ func (te *ToolExecutor) ToolDefs() []openai.Tool {
 					},
 				},
 			},
-			openai.Tool{
-				Type: openai.ToolTypeFunction,
-				Function: &openai.FunctionDefinition{
+			Tool{
+				Type: ToolTypeFunction,
+				Function: &FunctionDef{
 					Name:        "sandbox_shell",
 					Description: "Run an arbitrary shell command inside the sandbox Docker container. Use this to execute commands like git, ls, cat, wc, grep, find, or any other command available in the container. The command runs with the same mounts as sandbox scripts (/scripts read-only, /input read-only, /output read-write). Output beyond the configured cap is clipped with a hint telling you the full size; redirect large output to /output/ and read it back with sandbox_read.",
 					Parameters: map[string]interface{}{
@@ -841,7 +840,7 @@ func (te *ToolExecutor) SetContextInfo(currentTokens int) {
 
 // Execute runs a tool call and returns the result string.
 // ctx is used for operations that need cancellation/timeout (e.g. sandbox Docker commands).
-func (te *ToolExecutor) Execute(ctx context.Context, call openai.ToolCall) string {
+func (te *ToolExecutor) Execute(ctx context.Context, call ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 

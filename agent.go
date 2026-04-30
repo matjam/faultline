@@ -8,8 +8,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // Agent is the autonomous agent that runs in a continuous loop.
@@ -22,6 +20,7 @@ type Agent struct {
 	telegram *Telegram
 	sandbox  *Sandbox
 	kobold   *KoboldExtras // optional; may be nil if backend isn't KoboldCpp
+	chatLog  *ChatLogger   // human-readable transcript; closed on shutdown
 	logger   *slog.Logger
 }
 
@@ -62,6 +61,18 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 
 	llm := NewLLMClient(cfg.API.URL, cfg.API.Key, cfg.API.Model, logger)
 
+	// Human-readable chat transcript, separate from the slog debug log.
+	// Failure to open this is non-fatal: we log the error and continue
+	// without a transcript. The slog debug log still has everything, just
+	// in noisy escaped form.
+	chatLog, err := NewChatLogger(cfg.Log.Dir)
+	if err != nil {
+		logger.Warn("could not open chat transcript log; continuing without it",
+			"error", err, "dir", cfg.Log.Dir)
+		chatLog = nil
+	}
+	llm.SetChatLog(chatLog)
+
 	// Best-effort detection of KoboldCpp-specific endpoints. If the backend
 	// is anything else (real OpenAI, vLLM, llama.cpp's openai endpoint),
 	// detection fails silently and we keep using the heuristic token count
@@ -89,6 +100,7 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 		telegram: telegram,
 		sandbox:  sandbox,
 		kobold:   kobold,
+		chatLog:  chatLog,
 		logger:   logger,
 	}, nil
 }
@@ -98,6 +110,9 @@ func (a *Agent) Close() {
 	a.tools.Close()
 	if a.sandbox != nil {
 		a.sandbox.Close()
+	}
+	if a.chatLog != nil {
+		_ = a.chatLog.Close()
 	}
 }
 
@@ -132,9 +147,9 @@ const idleNudgePrompt = "[Time: %s]\n\nYou have produced %d text-only responses 
 // toolMessage builds a tool-role chat message satisfying a tool_call_id.
 // The body is prefixed with an RFC1123 timestamp so the model has a
 // consistent temporal frame for every tool result it sees.
-func toolMessage(toolCallID, body string) openai.ChatCompletionMessage {
-	return openai.ChatCompletionMessage{
-		Role:       openai.ChatMessageRoleTool,
+func toolMessage(toolCallID, body string) Message {
+	return Message{
+		Role:       RoleTool,
 		Content:    fmt.Sprintf("[%s]\n%s", time.Now().Format(time.RFC1123), body),
 		ToolCallID: toolCallID,
 	}
@@ -144,13 +159,33 @@ func toolMessage(toolCallID, body string) openai.ChatCompletionMessage {
 // real tokenizer when available (KoboldCpp's /api/extra/tokencount) and
 // falling back to the heuristic otherwise. The kobold path uses a short
 // timeout so a slow/failing tokenizer never wedges the agent loop.
-func (a *Agent) countMessageTokens(messages []openai.ChatCompletionMessage) int {
+func (a *Agent) countMessageTokens(messages []Message) int {
 	if a.kobold == nil {
 		return EstimateMessagesTokens(messages)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return a.kobold.CountMessages(ctx, messages)
+}
+
+// chatReq builds a ChatRequest pre-populated with the agent's configured
+// sampler parameters. Used by every Chat() call site so sampler config
+// stays in one place. Messages and tools are caller-supplied because they
+// vary per call (main loop, compaction, shutdown save).
+func (a *Agent) chatReq(messages []Message, tools []Tool) ChatRequest {
+	return ChatRequest{
+		Messages:          messages,
+		Tools:             tools,
+		Temperature:       a.cfg.Agent.Temperature,
+		TopP:              a.cfg.Agent.TopP,
+		PresencePenalty:   a.cfg.Agent.PresencePenalty,
+		FrequencyPenalty:  a.cfg.Agent.FrequencyPenalty,
+		Seed:              a.cfg.Agent.Seed,
+		MaxTokens:         a.cfg.Agent.MaxRespTokens,
+		TopK:              a.cfg.Agent.TopK,
+		MinP:              a.cfg.Agent.MinP,
+		RepetitionPenalty: a.cfg.Agent.RepetitionPenalty,
+	}
 }
 
 // abortInFlight asks the backend to stop any currently-running generation.
@@ -314,12 +349,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// generation off mid-thought wastes tokens and discards the model's
 		// reasoning. Any collaborator messages that arrive during generation
 		// are handled after the response comes back (see below).
-		resp, err := a.llm.Chat(ctx, ChatRequest{
-			Messages:    messages,
-			Tools:       toolDefs,
-			Temperature: a.cfg.Agent.Temperature,
-			MaxTokens:   a.cfg.Agent.MaxRespTokens,
-		})
+		resp, err := a.llm.Chat(ctx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			// If the parent context was canceled (forced shutdown via
 			// second SIGINT), return the cancellation error verbatim so
@@ -407,8 +437,8 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			} else {
 				content = RenderPrompt(prompts["continue"], now)
 			}
-			messages = append(messages, openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleUser,
+			messages = append(messages, Message{
+				Role:    RoleUser,
 				Content: content,
 			})
 		}
@@ -430,7 +460,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 //
 // When persistence is disabled or no state file exists, a fresh context
 // is built with the standard system prompt + cycle_start user turn.
-func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]string, int, error) {
+func (a *Agent) initializeContext() ([]Message, map[string]string, int, error) {
 	// Build search index
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
@@ -450,8 +480,8 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 	memories := a.gatherContextMemories()
 	now := time.Now()
 	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
-	systemMsg := openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleSystem,
+	systemMsg := Message{
+		Role:    RoleSystem,
 		Content: fullSystemPrompt,
 	}
 
@@ -466,11 +496,11 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 		// a freshly-built one. Keep everything from index 1 onwards.
 		// If the saved log somehow had no system message at index 0,
 		// just prepend the fresh one rather than discarding history.
-		var resumed []openai.ChatCompletionMessage
-		if saved[0].Role == openai.ChatMessageRoleSystem {
-			resumed = append([]openai.ChatCompletionMessage{systemMsg}, saved[1:]...)
+		var resumed []Message
+		if saved[0].Role == RoleSystem {
+			resumed = append([]Message{systemMsg}, saved[1:]...)
 		} else {
-			resumed = append([]openai.ChatCompletionMessage{systemMsg}, saved...)
+			resumed = append([]Message{systemMsg}, saved...)
 		}
 
 		a.logger.Info("context resumed from state file",
@@ -482,10 +512,10 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 	}
 
 	// Fresh start: system message + cycle_start user turn.
-	messages := []openai.ChatCompletionMessage{
+	messages := []Message{
 		systemMsg,
 		{
-			Role:    openai.ChatMessageRoleUser,
+			Role:    RoleUser,
 			Content: RenderPrompt(prompts["cycle_start"], now),
 		},
 	}
@@ -505,12 +535,12 @@ func (a *Agent) initializeContext() ([]openai.ChatCompletionMessage, map[string]
 // made to its own prompts during compaction take effect on the next turn.
 // The compaction prompt itself was already rendered before this loop began,
 // so edits to prompts/compaction.md only take effect on the *next* compaction.
-func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatCompletionMessage, toolDefs []openai.Tool, prompts map[string]string) ([]openai.ChatCompletionMessage, map[string]string, error) {
+func (a *Agent) compactContext(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) ([]Message, map[string]string, error) {
 	a.logger.Info("starting context compaction")
 
 	// Inject compaction prompt
-	messages = append(messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
+	messages = append(messages, Message{
+		Role:    RoleUser,
 		Content: RenderPrompt(prompts["compaction"], time.Now()),
 	})
 
@@ -525,12 +555,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 			break
 		}
 
-		resp, err := a.llm.Chat(ctx, ChatRequest{
-			Messages:    messages,
-			Tools:       toolDefs,
-			Temperature: a.cfg.Agent.Temperature,
-			MaxTokens:   a.cfg.Agent.MaxRespTokens,
-		})
+		resp, err := a.llm.Chat(ctx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			if ctx.Err() != nil {
 				a.abortInFlight()
@@ -568,7 +593,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []openai.ChatComple
 
 // rebuildContext creates a fresh conversation with the system prompt,
 // memories, and an optional summary from compaction.
-func (a *Agent) rebuildContext(summary string) ([]openai.ChatCompletionMessage, map[string]string, error) {
+func (a *Agent) rebuildContext(summary string) ([]Message, map[string]string, error) {
 	// Rebuild search index in case files changed
 	docs, err := a.memory.AllFiles()
 	if err == nil && len(docs) > 0 {
@@ -586,19 +611,19 @@ func (a *Agent) rebuildContext(summary string) ([]openai.ChatCompletionMessage, 
 	now := time.Now()
 	fullSystemPrompt := BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
 
-	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: fullSystemPrompt},
+	messages := []Message{
+		{Role: RoleSystem, Content: fullSystemPrompt},
 	}
 
 	if summary != "" {
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role: openai.ChatMessageRoleUser,
+		messages = append(messages, Message{
+			Role: RoleUser,
 			Content: fmt.Sprintf("[Context Compacted - %s]\n\nYour context was compacted. Here is your summary from before compaction:\n\n%s",
 				now.Format(time.RFC1123), summary),
 		})
 	} else {
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleUser,
+		messages = append(messages, Message{
+			Role:    RoleUser,
 			Content: RenderPrompt(prompts["continue"], now),
 		})
 	}
@@ -654,7 +679,7 @@ func (a *Agent) gatherContextMemories() []SearchResult {
 // injectPendingMessages checks for queued collaborator messages and appends
 // them to the conversation. Returns the updated messages and whether any
 // were injected.
-func (a *Agent) injectPendingMessages(messages []openai.ChatCompletionMessage) ([]openai.ChatCompletionMessage, bool) {
+func (a *Agent) injectPendingMessages(messages []Message) ([]Message, bool) {
 	if a.telegram == nil {
 		return messages, false
 	}
@@ -671,11 +696,11 @@ func (a *Agent) injectPendingMessages(messages []openai.ChatCompletionMessage) (
 // turn and appends them to the conversation. Used by both the between-turn
 // injector and the post-response handler when messages arrive during
 // generation.
-func (a *Agent) appendCollaboratorMessages(messages []openai.ChatCompletionMessage, pending []string) []openai.ChatCompletionMessage {
+func (a *Agent) appendCollaboratorMessages(messages []Message, pending []string) []Message {
 	for _, text := range pending {
 		a.logger.Info("injecting collaborator message into conversation", "text", text)
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role: openai.ChatMessageRoleUser,
+		messages = append(messages, Message{
+			Role: RoleUser,
 			Content: fmt.Sprintf("[Collaborator message - %s]\n\nYour collaborator says: %s\n\nReply with send_message before continuing. If their message changes what you should do next, adjust your plan accordingly; otherwise resume where you left off.",
 				time.Now().Format(time.RFC1123), text),
 		})
@@ -684,7 +709,7 @@ func (a *Agent) appendCollaboratorMessages(messages []openai.ChatCompletionMessa
 }
 
 // handleShutdown wraps gracefulSave and translates errShutdown to nil.
-func (a *Agent) handleShutdown(ctx context.Context, messages []openai.ChatCompletionMessage, toolDefs []openai.Tool, prompts map[string]string) error {
+func (a *Agent) handleShutdown(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) error {
 	err := a.gracefulSave(ctx, messages, toolDefs, prompts)
 	if errors.Is(err, errShutdown) {
 		return nil
@@ -694,7 +719,7 @@ func (a *Agent) handleShutdown(ctx context.Context, messages []openai.ChatComple
 
 // gracefulSave gives the agent a limited number of turns to save its state
 // before the process exits. Uses a 2-minute timeout.
-func (a *Agent) gracefulSave(ctx context.Context, messages []openai.ChatCompletionMessage, toolDefs []openai.Tool, prompts map[string]string) error {
+func (a *Agent) gracefulSave(ctx context.Context, messages []Message, toolDefs []Tool, prompts map[string]string) error {
 	a.logger.Info("graceful shutdown: asking agent to save state")
 
 	saveCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -702,19 +727,14 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []openai.ChatCompleti
 
 	// Load the mutable shutdown prompt
 	shutdownPrompt := prompts["shutdown"]
-	messages = append(messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
+	messages = append(messages, Message{
+		Role:    RoleUser,
 		Content: RenderPrompt(shutdownPrompt, time.Now()),
 	})
 
 	const maxSaveTurns = 10
 	for i := 0; i < maxSaveTurns; i++ {
-		resp, err := a.llm.Chat(saveCtx, ChatRequest{
-			Messages:    messages,
-			Tools:       toolDefs,
-			Temperature: a.cfg.Agent.Temperature,
-			MaxTokens:   a.cfg.Agent.MaxRespTokens,
-		})
+		resp, err := a.llm.Chat(saveCtx, a.chatReq(messages, toolDefs))
 		if err != nil {
 			a.logger.Error("LLM call failed during save", "error", err)
 			return errShutdown

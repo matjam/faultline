@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // KoboldExtras provides access to KoboldCpp-specific endpoints that sit
@@ -117,7 +115,7 @@ func (k *KoboldExtras) CountString(ctx context.Context, s string) int {
 // endpoint doesn't see.
 //
 // On any error, falls back to EstimateMessagesTokens.
-func (k *KoboldExtras) CountMessages(ctx context.Context, messages []openai.ChatCompletionMessage) int {
+func (k *KoboldExtras) CountMessages(ctx context.Context, messages []Message) int {
 	if !k.Detected() || len(messages) == 0 {
 		return EstimateMessagesTokens(messages)
 	}

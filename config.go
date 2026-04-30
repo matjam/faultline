@@ -40,6 +40,27 @@ type AgentConfig struct {
 	MaxRespTokens       int     `toml:"max_response_tokens"`
 	CompactionThreshold int     `toml:"compaction_threshold"`
 
+	// Sampler parameters. The OpenAI-spec fields (Temperature, TopP,
+	// PresencePenalty, FrequencyPenalty, Seed) are sent on every request.
+	// The vendor-extension fields (TopK, MinP, RepetitionPenalty) are
+	// not in the OpenAI spec but are accepted as additional JSON keys
+	// by KoboldCpp, llama.cpp, and vLLM. Servers that don't recognize
+	// them silently ignore them, so it's safe to set them regardless of
+	// backend.
+	//
+	// All sampler fields use zero-value-omitted semantics: a field set
+	// to 0 is not sent on the wire, and the server uses its own default
+	// (or whatever is configured server-side via e.g. KoboldCpp's
+	// --gendefaults). Seed=0 specifically means "unset" because random
+	// seeds are the typical desired default.
+	TopP              float32 `toml:"top_p"`
+	PresencePenalty   float32 `toml:"presence_penalty"`
+	FrequencyPenalty  float32 `toml:"frequency_penalty"`
+	Seed              int     `toml:"seed"`
+	TopK              int     `toml:"top_k"`
+	MinP              float32 `toml:"min_p"`
+	RepetitionPenalty float32 `toml:"repetition_penalty"`
+
 	// StateFile is the path to a JSON file holding the live conversation
 	// log. When non-empty, the agent saves the message log atomically at
 	// the top of every loop iteration (right before each LLM call) and

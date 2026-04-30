@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // fakeKobold returns an httptest.Server that mimics the subset of KoboldCpp
@@ -246,13 +244,13 @@ func TestKoboldExtras_CountMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msgs := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: "system prompt"},
-		{Role: openai.ChatMessageRoleUser, Content: "hello"},
+	msgs := []Message{
+		{Role: RoleSystem, Content: "system prompt"},
+		{Role: RoleUser, Content: "hello"},
 		{
-			Role: openai.ChatMessageRoleAssistant,
-			ToolCalls: []openai.ToolCall{{
-				Function: openai.FunctionCall{
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{{
+				Function: FunctionCall{
 					Name: "f", Arguments: `{"x":1}`,
 				},
 			}},
@@ -283,7 +281,7 @@ func TestKoboldExtras_CountMessages_EmptyAndFallback(t *testing.T) {
 	}
 
 	// Detected with failing tokencount: falls back to heuristic.
-	msgs := []openai.ChatCompletionMessage{{Content: strings.Repeat("a", 400)}}
+	msgs := []Message{{Content: strings.Repeat("a", 400)}}
 	heuristic := EstimateMessagesTokens(msgs)
 	if got := k.CountMessages(context.Background(), msgs); got != heuristic {
 		t.Errorf("expected fallback to heuristic %d, got %d", heuristic, got)
@@ -292,7 +290,7 @@ func TestKoboldExtras_CountMessages_EmptyAndFallback(t *testing.T) {
 
 func TestKoboldExtras_CountMessages_NotDetected(t *testing.T) {
 	k := NewKoboldExtras("http://nonexistent.invalid", quietLogger())
-	msgs := []openai.ChatCompletionMessage{{Content: "abcd"}}
+	msgs := []Message{{Content: "abcd"}}
 	heuristic := EstimateMessagesTokens(msgs)
 	if got := k.CountMessages(context.Background(), msgs); got != heuristic {
 		t.Errorf("undetected client should use heuristic %d, got %d", heuristic, got)

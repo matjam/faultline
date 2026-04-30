@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // captureLogger returns a logger writing to a buffer so tests can both
@@ -21,11 +19,11 @@ func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	return logger, buf
 }
 
-func sampleMessages() []openai.ChatCompletionMessage {
-	return []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: "you are an agent"},
-		{Role: openai.ChatMessageRoleUser, Content: "hello"},
-		{Role: openai.ChatMessageRoleAssistant, Content: "hi"},
+func sampleMessages() []Message {
+	return []Message{
+		{Role: RoleSystem, Content: "you are an agent"},
+		{Role: RoleUser, Content: "hello"},
+		{Role: RoleAssistant, Content: "hi"},
 	}
 }
 
@@ -146,8 +144,8 @@ func TestSaveState_AtomicReplacesExisting(t *testing.T) {
 	if err := SaveState(path, sampleMessages(), 1); err != nil {
 		t.Fatal(err)
 	}
-	updated := append(sampleMessages(), openai.ChatCompletionMessage{
-		Role: openai.ChatMessageRoleUser, Content: "second turn",
+	updated := append(sampleMessages(), Message{
+		Role: RoleUser, Content: "second turn",
 	})
 	if err := SaveState(path, updated, 2); err != nil {
 		t.Fatal(err)
@@ -175,17 +173,17 @@ func TestSaveState_AtomicReplacesExisting(t *testing.T) {
 }
 
 func TestSanitizeMessages_DropsTrailingUnsatisfiedToolCalls(t *testing.T) {
-	msgs := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: "sys"},
-		{Role: openai.ChatMessageRoleUser, Content: "hi"},
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "hi"},
 		{
-			Role: openai.ChatMessageRoleAssistant,
-			ToolCalls: []openai.ToolCall{
-				{ID: "call_1", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "x"}},
-				{ID: "call_2", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "y"}},
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{
+				{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "x"}},
+				{ID: "call_2", Type: ToolTypeFunction, Function: FunctionCall{Name: "y"}},
 			},
 		},
-		{Role: openai.ChatMessageRoleTool, ToolCallID: "call_1", Content: "result1"},
+		{Role: RoleTool, ToolCallID: "call_1", Content: "result1"},
 		// call_2 never got a tool response -- crash mid-dispatch.
 	}
 	got := sanitizeMessages(msgs)
@@ -195,16 +193,16 @@ func TestSanitizeMessages_DropsTrailingUnsatisfiedToolCalls(t *testing.T) {
 }
 
 func TestSanitizeMessages_KeepsCompleteToolCallTurns(t *testing.T) {
-	msgs := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: "sys"},
+	msgs := []Message{
+		{Role: RoleSystem, Content: "sys"},
 		{
-			Role: openai.ChatMessageRoleAssistant,
-			ToolCalls: []openai.ToolCall{
-				{ID: "call_1", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "x"}},
+			Role: RoleAssistant,
+			ToolCalls: []ToolCall{
+				{ID: "call_1", Type: ToolTypeFunction, Function: FunctionCall{Name: "x"}},
 			},
 		},
-		{Role: openai.ChatMessageRoleTool, ToolCallID: "call_1", Content: "result"},
-		{Role: openai.ChatMessageRoleAssistant, Content: "thanks"},
+		{Role: RoleTool, ToolCallID: "call_1", Content: "result"},
+		{Role: RoleAssistant, Content: "thanks"},
 	}
 	got := sanitizeMessages(msgs)
 	if len(got) != len(msgs) {

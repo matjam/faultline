@@ -11,7 +11,8 @@ faultline/
   main.go          Entry point, signal handling, two-phase shutdown
   agent.go         Core agent loop, context management, compaction, shutdown
   config.go        TOML configuration loading and struct definitions
-  llm.go           OpenAI-compatible LLM client wrapper
+  llm.go           Hand-rolled OpenAI-compatible chat completions client
+  openai.go        Wire-format types for the chat completions API
   kobold.go        Optional KoboldCpp native-API client (tokencount, abort, perf)
   memory.go        File-based persistent memory store with trash/restore
   index.go         BM25 search index (pure Go, in-memory)
@@ -94,14 +95,19 @@ The `Agent` struct and its operation loop. Key components:
 
 Defines the `Config` struct with nested sections: `APIConfig`, `AgentConfig`, `TelegramConfig`, `LogConfig`, `SandboxConfig`. Includes a custom `duration` type that implements `encoding.TextUnmarshaler` for TOML duration strings (e.g., `"60s"`, `"5m"`). `DefaultConfig()` provides sensible defaults. `LoadConfig()` reads and parses the TOML file, with missing fields keeping defaults.
 
-### llm.go (139 lines)
+### llm.go (273 lines)
 
-`LLMClient` wraps `go-openai`. Key details:
+`LLMClient` is a hand-rolled HTTP client for the OpenAI-compatible `/v1/chat/completions` endpoint. We previously used `github.com/sashabaranov/go-openai`, but that library has no public API for injecting vendor-specific extras (`top_k`, `min_p`, `repetition_penalty`) into chat completion requests. Since the agent only needs one POST endpoint with no streaming, dropping the dependency was simpler than working around it. Key details:
 
-- Uses `openai.DefaultConfig()` with a custom `BaseURL` for OpenAI-compatible endpoints.
-- `Chat()` sends completion requests, logging only new messages since the last call (avoids re-logging the full context on every turn).
-- `EstimateTokens()` uses a rough heuristic of ~4 characters per token. Used as the fallback when KoboldCpp's real tokenizer isn't available.
-- `EstimateMessagesTokens()` sums token estimates across all messages, including tool call names and arguments, plus a small overhead per message. Same fallback role.
+- **Construction**: `NewLLMClient(apiURL, apiKey, model, logger)`. The HTTP client has no global timeout (a long generation may legitimately take many minutes); cancellation is driven by the caller's context. The Bearer token is set on each request when `apiKey` is non-empty.
+- **`ChatRequest`** is the public input. The `Model` field is filled in by the client from its configured value, so callers don't set it. Sampler fields (Temperature, TopP, PresencePenalty, FrequencyPenalty, Seed, MaxTokens, plus the vendor extensions TopK, MinP, RepetitionPenalty) use zero-value-omitted semantics: a 0 means "don't send, let the server decide." Seed=0 specifically means "unset" because random seeds are the typical default.
+- **`chatRequestWire`** is the internal JSON shape we POST. Kept separate so we control exactly which keys appear on the wire and with what `omitempty` behavior. Vendor extensions ride alongside the spec fields; servers that don't recognize them silently ignore them.
+- **`Chat()`**: marshals the wire struct, POSTs to `apiURL + "/chat/completions"`, parses non-2xx responses through an OpenAI-style error envelope before falling back to the raw body, decodes successful responses into a `ChatResponse`. Logs only new messages since the last call (avoids re-logging the full context on every turn).
+- **`EstimateTokens()` / `EstimateMessagesTokens()`**: rough heuristic of ~4 characters per token. Used as the fallback when KoboldCpp's real tokenizer isn't available.
+
+### openai.go (85 lines)
+
+Wire-format types matching the OpenAI chat completions API. Defines `Message`, `ToolCall`, `FunctionCall`, `Tool`, `FunctionDef`, `ChatResponse`, `Choice`, plus the role constants (`RoleSystem`, `RoleUser`, `RoleAssistant`, `RoleTool`) and `ToolTypeFunction`. JSON tags match what `go-openai` used to write so existing state files continue to load without migration. Fields go-openai included that we don't use (Refusal, MultiContent, Name, ReasoningContent, the deprecated FunctionCall) are intentionally omitted -- `encoding/json` silently ignores unknown fields on Unmarshal, so legacy state files with those keys still parse cleanly.
 
 ### kobold.go (260 lines)
 
@@ -200,11 +206,12 @@ Manages the mutable prompt system:
 | Package | Purpose |
 |---------|---------|
 | `github.com/BurntSushi/toml` | TOML configuration parsing |
-| `github.com/sashabaranov/go-openai` | OpenAI-compatible API client |
 | `github.com/go-telegram-bot-api/telegram-bot-api/v5` | Telegram bot API |
+| `github.com/Mad-Pixels/goldmark-tgmd` | Markdown to Telegram MarkdownV2 |
 | `golang.org/x/net` | HTML parsing for web_fetch |
-| `github.com/Mad-Pixels/goldmark-tgmd` | Markdown to Telegram MarkdownV2 (indirect) |
 | `github.com/yuin/goldmark` | Markdown parser (indirect, used by goldmark-tgmd) |
+
+The OpenAI-compatible chat completions client is hand-rolled in `llm.go` + `openai.go` (no SDK dependency).
 
 ## Runtime Dependencies
 

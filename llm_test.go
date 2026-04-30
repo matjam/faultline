@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	openai "github.com/sashabaranov/go-openai"
 )
 
 func TestEstimateTokens(t *testing.T) {
@@ -33,9 +31,9 @@ func TestEstimateMessagesTokens_Empty(t *testing.T) {
 
 func TestEstimateMessagesTokens_PerMessageOverhead(t *testing.T) {
 	// Each message has a +4 overhead beyond its content.
-	msgs := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleUser, Content: ""},
-		{Role: openai.ChatMessageRoleUser, Content: ""},
+	msgs := []Message{
+		{Role: RoleUser, Content: ""},
+		{Role: RoleUser, Content: ""},
 	}
 	if got := EstimateMessagesTokens(msgs); got != 8 {
 		t.Errorf("got %d, want 8 (2 messages * 4 overhead)", got)
@@ -43,13 +41,13 @@ func TestEstimateMessagesTokens_PerMessageOverhead(t *testing.T) {
 }
 
 func TestEstimateMessagesTokens_IncludesContentAndToolCalls(t *testing.T) {
-	msgs := []openai.ChatCompletionMessage{
+	msgs := []Message{
 		{
-			Role:    openai.ChatMessageRoleAssistant,
+			Role:    RoleAssistant,
 			Content: strings.Repeat("a", 400), // 100 tokens
-			ToolCalls: []openai.ToolCall{
+			ToolCalls: []ToolCall{
 				{
-					Function: openai.FunctionCall{
+					Function: FunctionCall{
 						Name:      strings.Repeat("n", 16), // 4 tokens
 						Arguments: strings.Repeat("g", 40), // 10 tokens
 					},
@@ -65,8 +63,8 @@ func TestEstimateMessagesTokens_IncludesContentAndToolCalls(t *testing.T) {
 
 func TestEstimateMessagesTokens_GrowsWithMessages(t *testing.T) {
 	// Sanity: more messages -> more tokens, linearly.
-	one := []openai.ChatCompletionMessage{{Content: strings.Repeat("x", 100)}}
-	two := append(one, openai.ChatCompletionMessage{Content: strings.Repeat("x", 100)})
+	one := []Message{{Content: strings.Repeat("x", 100)}}
+	two := append(one, Message{Content: strings.Repeat("x", 100)})
 
 	if EstimateMessagesTokens(two) <= EstimateMessagesTokens(one) {
 		t.Error("expected more tokens with two messages than one")
