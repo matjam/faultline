@@ -13,10 +13,10 @@ import (
 // — no HTML parsing needed.
 func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 	var args struct {
-		Title    string `json:"title"`
-		Offset   int    `json:"offset"`
-		Length   int    `json:"length"`
-		Intro    bool   `json:"intro"`
+		Title  string `json:"title"`
+		Offset int    `json:"offset"`
+		Length int    `json:"length"`
+		Intro  bool   `json:"intro"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Error parsing arguments: %s", err)
@@ -37,12 +37,12 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 	// Build the MediaWiki API URL
 	apiURL := "https://en.wikipedia.org/w/api.php"
 	params := url.Values{
-		"action":     {"query"},
-		"titles":     {args.Title},
-		"prop":       {"extracts"},
+		"action":      {"query"},
+		"titles":      {args.Title},
+		"prop":        {"extracts"},
 		"explaintext": {"true"},
-		"format":     {"json"},
-		"redirects":  {"1"},
+		"format":      {"json"},
+		"redirects":   {"1"},
 	}
 	if args.Intro {
 		params.Set("exintro", "true")
@@ -85,10 +85,10 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 		var result struct {
 			Query struct {
 				Pages []struct {
-					Missing  string `json:"missing,omitempty"`
-					Title    string `json:"title"`
-					PageID   int    `json:"pageid"`
-					Extract  string `json:"extract"`
+					Missing string `json:"missing,omitempty"`
+					Title   string `json:"title"`
+					PageID  int    `json:"pageid"`
+					Extract string `json:"extract"`
 					Namespace struct {
 						ID   int    `json:"ns"`
 						Name string `json:"*"`
@@ -136,7 +136,7 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 
 	// Add position metadata
 	endPos := args.Offset + len(text)
-	header := fmt.Sprintf("[%d total chars | showing %d–%d]", totalLen, args.Offset, endPos)
+	header := fmt.Sprintf("[%d total chars | showing %d\u2013%d]", totalLen, args.Offset, endPos)
 	if truncated {
 		header += fmt.Sprintf(" [use offset=%d to continue]", endPos)
 	}
