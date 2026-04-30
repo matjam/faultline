@@ -1,5 +1,13 @@
 package main
 
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+)
+
 // wikiFetch fetches a Wikipedia article as clean plain text via the MediaWiki API.
 // Uses action=query&prop=extracts&explaintext=true for direct plain text output
 // — no HTML parsing needed.
