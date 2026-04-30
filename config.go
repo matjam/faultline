@@ -62,6 +62,13 @@ type AgentConfig struct {
 	MinP              float32 `toml:"min_p"`
 	RepetitionPenalty float32 `toml:"repetition_penalty"`
 
+	// MaxSleep is the upper bound enforced by the `sleep` tool. The agent
+	// can request shorter sleeps; longer ones are clamped to this value.
+	// Operator messages and forced shutdown still interrupt mid-sleep
+	// regardless of this setting. Zero or negative is replaced with the
+	// 15-minute default at config load.
+	MaxSleep duration `toml:"max_sleep"`
+
 	// StateFile is the path to a JSON file holding the live conversation
 	// log. When non-empty, the agent saves the message log atomically at
 	// the top of every loop iteration (right before each LLM call) and
@@ -163,6 +170,7 @@ func DefaultConfig() *Config {
 			Temperature:         0.8,
 			MaxRespTokens:       4096,
 			CompactionThreshold: 150000,
+			MaxSleep:            duration(15 * time.Minute),
 		},
 		Log: LogConfig{
 			Level: "info",
@@ -198,6 +206,13 @@ func LoadConfig(path string) (*Config, error) {
 
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config file: %w", err)
+	}
+
+	// Replace nonsensical sleep caps with the default rather than allowing
+	// max_sleep = 0 to silently disable the sleep tool's clamp. A user who
+	// genuinely wants no sleep cap can set a very large value explicitly.
+	if cfg.Agent.MaxSleep.Duration() <= 0 {
+		cfg.Agent.MaxSleep = duration(15 * time.Minute)
 	}
 
 	return cfg, nil

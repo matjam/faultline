@@ -439,6 +439,23 @@ func (te *ToolExecutor) ToolDefs() []Tool {
 				},
 			},
 		},
+		{
+			Type: ToolTypeFunction,
+			Function: &FunctionDef{
+				Name:        "sleep",
+				Description: fmt.Sprintf("Pause for a number of seconds before your next turn. Useful when waiting on the world (e.g. for an external process, or to space out polling) rather than burning context with idle turns. Operator messages interrupt the sleep immediately, and forced shutdown also wakes it. If a collaborator message is already pending the sleep returns at once. Maximum is %d seconds (%s); larger values are clamped.", int(te.maxSleep.Seconds()), te.maxSleep),
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"seconds": map[string]interface{}{
+							"type":        "integer",
+							"description": "Number of seconds to sleep. Must be at least 1.",
+						},
+					},
+					"required": []string{"seconds"},
+				},
+			},
+		},
 	}
 
 	if te.telegram != nil {
@@ -835,10 +852,11 @@ type ToolExecutor struct {
 	maxTokens     int
 	currentTokens int
 	limits        LimitsConfig
+	maxSleep      time.Duration // upper bound for the `sleep` tool
 }
 
 // NewToolExecutor creates a new tool executor. kobold may be nil.
-func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig) *ToolExecutor {
+func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram, sandbox *Sandbox, email *EmailConfig, kobold *KoboldExtras, logger *slog.Logger, maxTokens int, limits LimitsConfig, maxSleep time.Duration) *ToolExecutor {
 	if sandbox != nil {
 		sandbox.SetOutputLimit(limits.SandboxOutputChars)
 	}
@@ -852,6 +870,7 @@ func NewToolExecutor(memory *MemoryStore, index *SearchIndex, telegram *Telegram
 		logger:    logger,
 		maxTokens: maxTokens,
 		limits:    limits,
+		maxSleep:  maxSleep,
 		cache:     newWebCache(60 * time.Second),
 		http: &http.Client{
 			Timeout: 30 * time.Second,
@@ -939,6 +958,8 @@ func (te *ToolExecutor) Execute(ctx context.Context, call ToolCall) string {
 		return te.contextStatus()
 	case "get_time":
 		return time.Now().Format("Monday, January 2, 2006 3:04:05 PM MST")
+	case "sleep":
+		return te.sleep(ctx, args)
 	case "send_message":
 		return te.sendMessage(args)
 	case "email_fetch":
@@ -1576,6 +1597,85 @@ func (te *ToolExecutor) sendMessage(argsJSON string) string {
 
 	te.logger.Info("message sent to collaborator", "length", len(args.Text))
 	return "Message sent to collaborator."
+}
+
+// sleep suspends the agent for the requested number of seconds, returning
+// early if the operator sends a message or the process is shutting down.
+//
+// The handler does not drain the Telegram queue; it only peeks. The agent
+// loop's existing between-turn drain (Agent.injectPendingMessages) is the
+// single owner of the message queue. Returning to the agent loop with a
+// pending message in place causes it to be surfaced on the next turn just
+// like any message that arrived while no tool was running.
+//
+// Polling at 500ms is intentional: minute-scale sleeps don't care about
+// sub-second wake latency, and avoiding a notify channel keeps the
+// Telegram surface area small.
+func (te *ToolExecutor) sleep(ctx context.Context, argsJSON string) string {
+	var args struct {
+		Seconds int `json:"seconds"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+
+	if args.Seconds <= 0 {
+		return "Error: seconds must be a positive integer."
+	}
+
+	requested := time.Duration(args.Seconds) * time.Second
+	target := requested
+	var clampNote string
+	if te.maxSleep > 0 && target > te.maxSleep {
+		clampNote = fmt.Sprintf("Requested %s exceeds the configured maximum %s; clamped. ", requested, te.maxSleep)
+		target = te.maxSleep
+	}
+
+	// If a collaborator message is already queued at entry, do not sleep
+	// through it. The agent should respond before doing anything else.
+	if te.telegram != nil && te.telegram.HasPending() {
+		te.logger.Info("sleep skipped: collaborator message already pending",
+			"requested_s", args.Seconds)
+		return clampNote + "Did not sleep: a collaborator message is already pending. Handle it before sleeping."
+	}
+
+	te.logger.Info("sleep started", "requested_s", args.Seconds, "actual_s", int(target.Seconds()))
+
+	const pollInterval = 500 * time.Millisecond
+	start := time.Now()
+	deadline := start.Add(target)
+
+	timer := time.NewTimer(target)
+	defer timer.Stop()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			elapsed := time.Since(start).Round(time.Second)
+			te.logger.Info("sleep interrupted by shutdown", "elapsed_s", int(elapsed.Seconds()))
+			return clampNote + fmt.Sprintf("Slept for %s then interrupted: shutdown.", elapsed)
+
+		case <-timer.C:
+			elapsed := time.Since(start).Round(time.Second)
+			te.logger.Info("sleep completed", "elapsed_s", int(elapsed.Seconds()))
+			return clampNote + fmt.Sprintf("Slept for %s.", elapsed)
+
+		case <-ticker.C:
+			if te.telegram != nil && te.telegram.HasPending() {
+				elapsed := time.Since(start).Round(time.Second)
+				te.logger.Info("sleep interrupted by collaborator message", "elapsed_s", int(elapsed.Seconds()))
+				return clampNote + fmt.Sprintf("Slept for %s then interrupted: collaborator message pending.", elapsed)
+			}
+			// Belt-and-braces: if the timer fires between selects somehow,
+			// still exit at the deadline rather than oversleeping.
+			if !time.Now().Before(deadline) {
+				elapsed := time.Since(start).Round(time.Second)
+				return clampNote + fmt.Sprintf("Slept for %s.", elapsed)
+			}
+		}
+	}
 }
 
 func (te *ToolExecutor) memoryEdit(argsJSON string) string {

@@ -201,3 +201,12 @@ func (t *Telegram) Pending() []string {
 	t.pending = nil
 	return msgs
 }
+
+// HasPending reports whether any incoming messages are queued, without
+// draining them. Used by the sleep tool to wake on operator input while
+// leaving the queue intact for the agent loop's normal between-turn drain.
+func (t *Telegram) HasPending() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.pending) > 0
+}

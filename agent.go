@@ -89,7 +89,16 @@ func NewAgent(cfg *Config, telegram *Telegram, logger *slog.Logger) (*Agent, err
 		cancel()
 	}
 
-	executor := NewToolExecutor(memory, index, telegram, sandbox, &cfg.Email, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits)
+	// Only expose the email_fetch tool when [email] is fully populated.
+	// EmailConfig is a value type, so &cfg.Email is never nil; passing it
+	// unconditionally would advertise email_fetch to the model and fail at
+	// IMAP connect time instead of being cleanly hidden.
+	var email *EmailConfig
+	if cfg.Email.Enabled() {
+		email = &cfg.Email
+	}
+
+	executor := NewToolExecutor(memory, index, telegram, sandbox, email, kobold, logger, cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 
 	return &Agent{
 		cfg:      cfg,

@@ -55,6 +55,7 @@ Agent.Run() -- infinite loop
   |     +-> sandbox_*        (Docker Python execution)
   |     +-> context_status   (token usage + backend perf via KoboldExtras if detected)
   |     +-> get_time         (current timestamp)
+  |     +-> sleep            (suspend N seconds, interrupted by operator messages)
   |
   +-> If text-only response: inject continue prompt, loop
   |
@@ -151,6 +152,7 @@ The largest file. Contains all tool definitions and execution handlers. Key sect
 - **Sandbox tool handlers**: Delegate to the `Sandbox` struct methods.
 - **`context_status`**: Reports estimated token usage vs. maximum.
 - **`get_time`**: Returns the current timestamp.
+- **`sleep`**: Suspends the agent for N seconds. Polls `Telegram.HasPending()` every 500ms so an operator message wakes the sleep without draining the queue (the agent's normal between-turn drain handles it). Bounded by `agent.max_sleep` (default 15m); requests above the cap are clamped with a note in the result. Returns immediately if a collaborator message is already queued at entry.
 
 ### telegram.go (217 lines)
 
