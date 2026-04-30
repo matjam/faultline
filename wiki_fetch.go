@@ -81,19 +81,22 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 			return fmt.Sprintf("Error reading response: %s", err)
 		}
 
-		// Parse JSON response
+		// Parse JSON response. The MediaWiki API returns "pages" as an
+		// object keyed by page ID (e.g. {"12345": {...}}), not a list.
+		// Negative keys like "-1" are used for missing pages.
+		type wikiPage struct {
+			Missing   string `json:"missing,omitempty"`
+			Title     string `json:"title"`
+			PageID    int    `json:"pageid"`
+			Extract   string `json:"extract"`
+			Namespace struct {
+				ID   int    `json:"ns"`
+				Name string `json:"*"`
+			} `json:"namespace"`
+		}
 		var result struct {
 			Query struct {
-				Pages []struct {
-					Missing   string `json:"missing,omitempty"`
-					Title     string `json:"title"`
-					PageID    int    `json:"pageid"`
-					Extract   string `json:"extract"`
-					Namespace struct {
-						ID   int    `json:"ns"`
-						Name string `json:"*"`
-					} `json:"namespace"`
-				} `json:"pages"`
+				Pages map[string]wikiPage `json:"pages"`
 			} `json:"query"`
 		}
 
@@ -105,7 +108,13 @@ func (te *ToolExecutor) wikiFetch(argsJSON string) string {
 			return fmt.Sprintf("No results found for Wikipedia article: %s", args.Title)
 		}
 
-		page := result.Query.Pages[0]
+		// Take the first (and typically only) page from the map.
+		var page wikiPage
+		for _, p := range result.Query.Pages {
+			page = p
+			break
+		}
+
 		if page.Missing != "" {
 			return fmt.Sprintf("Wikipedia article not found: %s", args.Title)
 		}
