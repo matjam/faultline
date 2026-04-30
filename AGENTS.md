@@ -4,234 +4,269 @@ This document describes the code structure, architecture, and design decisions i
 
 ## Project Layout
 
-Faultline is a single `package main` Go project. All source files live in the repository root with no sub-packages. The logical modules are separated by file:
+Faultline follows hexagonal (ports & adapters) architecture. The agent loop is the domain hexagon; everything else (LLM, memory, telegram, sandbox, IMAP, state persistence) is an adapter behind a port the domain owns.
 
 ```
 faultline/
-  main.go          Entry point, signal handling, two-phase shutdown
-  agent.go         Core agent loop, context management, compaction, shutdown
-  config.go        TOML configuration loading and struct definitions
-  llm.go           Hand-rolled OpenAI-compatible chat completions client
-  openai.go        Wire-format types for the chat completions API
-  kobold.go        Optional KoboldCpp native-API client (tokencount, abort, perf)
-  memory.go        File-based persistent memory store with trash/restore
-  index.go         BM25 search index (pure Go, in-memory)
-  tools.go         Tool definitions, dispatch, web fetching, HTML-to-markdown
-  telegram.go      Telegram bot for bidirectional collaborator communication
-  sandbox.go       Docker-based Python script execution environment
-  prompt.go        Prompt loading, embedding, template rendering
-  log.go           Daily-rotating log files and multi-handler for slog
-  prompts/         Embedded prompt templates (compiled into binary)
-    system.md      Main system prompt
-    compaction.md  Context compaction instructions
-    cycle_start.md First message at startup
-    continue.md    Injected when agent responds without tool calls
-    shutdown.md    Graceful shutdown instructions
+  cmd/faultline/
+    main.go                   composition root: parse config, build adapters,
+                              wire them into the agent via ports, run the loop
+  internal/
+    agent/                    the hexagon (domain)
+      agent.go                Agent struct, Run() loop, compaction, idle
+                              detection, graceful shutdown
+      ports.go                interfaces the agent depends on:
+                              ChatModel, Memory, Searcher, Operator,
+                              Tokenizer, Tools, StateStore
+    config/                   TOML config loading
+    log/                      DailyFileWriter, MultiHandler (slog)
+    prompts/                  embedded prompt templates, Load, LoadAll,
+                              Render, BuildCycleContext
+      templates/              the embedded *.md defaults
+    tools/                    tool registry & dispatcher
+      executor.go             Executor + all tool handlers
+      wiki.go                 wiki_fetch tool
+      html_test.go            HTML-to-markdown converter tests
+    search/bm25/              pure-Go BM25 search index
+    llm/                      shared LLM types (Message, Tool, ChatRequest, ...)
+                              + heuristic token estimator
+    adapters/
+      llm/openai/             OpenAI-compatible HTTP client + ChatLogger
+      llm/kobold/             KoboldCpp extras (tokencount, abort, perf)
+      memory/fs/              filesystem-backed Memory adapter
+      operator/telegram/      Telegram bot for collaborator messaging
+      sandbox/docker/         Docker-based Python sandbox
+      email/imap/             IMAP email client
+      state/jsonfile/         JSON-file conversation persistence (Save/Load
+                              + Persister wrapper that satisfies StateStore)
 ```
+
+The `internal/` prefix is enforced by Go: nothing outside this module can import these packages. That's a feature.
 
 ## Architecture Overview
 
 ```
-main.go
+cmd/faultline/main.go
   |
-  v
-Agent.Run() -- infinite loop
+  +-> Parse config, build logger
   |
-  +-> Build system prompt (system.md + recent memories + timestamp)
+  +-> Construct adapters:
+  |     fs.New, bm25.New, docker.New, openai.New, kobold.New (best-effort
+  |     detection), telegram.New, jsonfile.NewPersister, tools.New
   |
-  +-> LLM Chat Request (messages + tool definitions)
-  |     |
-  |     v
-  |   LLMClient.Chat() --> OpenAI-compatible API
-  |     |
-  |     v
-  |   Response: tool calls or text
+  +-> agent.New(cfg, agent.Deps{Chat, Memory, Search, Operator, Tokenizer,
+  |                              Tools, State}, logger)
   |
-  +-> Tool execution (if tool calls present)
-  |     +-> web_fetch        (HTTP + HTML-to-markdown + TTL cache)
-  |     +-> memory_*         (MemoryStore -- filesystem CRUD)
-  |     +-> memory_search    (BM25 SearchIndex)
-  |     +-> send_message     (Telegram outbound)
-  |     +-> sandbox_*        (Docker Python execution)
-  |     +-> context_status   (token usage + backend perf via KoboldExtras if detected)
-  |     +-> get_time         (current timestamp)
-  |     +-> sleep            (suspend N seconds, interrupted by operator messages)
-  |
-  +-> If text-only response: inject continue prompt, loop
-  |
-  +-> Context compaction (when tokens > threshold)
-  |     +-> Ask agent to save state to memory
-  |     +-> Agent writes summary
-  |     +-> Rebuild context from system prompt + fresh memories + summary
-  |
-  +-> Graceful shutdown (on first SIGINT)
-        +-> Inject shutdown prompt
-        +-> Agent saves state (up to 10 turns, 2min timeout)
+  +-> agent.Run(ctx, shutdownCh)
+        |
+        v
+      Agent.Run -- infinite loop
+        |
+        +-> Build system prompt (system.md + recent memories + timestamp)
+        |   via prompts.BuildCycleContext
+        |
+        +-> chat.Chat(ctx, llm.ChatRequest{...})
+        |
+        +-> If tool calls: tools.Execute() per call
+        |
+        +-> If text-only: inject continue prompt, loop
+        |
+        +-> Context compaction (when tokens > threshold)
+        |     +-> Inject compaction prompt
+        |     +-> Agent saves state via tools (memory_write etc.)
+        |     +-> Rebuild context from system prompt + summary
+        |
+        +-> Tool dispatch (delegated to tools.Executor):
+        |     +-> web_fetch        (HTTP + HTML-to-markdown + TTL cache)
+        |     +-> wiki_fetch       (MediaWiki API + cache)
+        |     +-> memory_*         (fs.Store)
+        |     +-> memory_search    (bm25.Index)
+        |     +-> send_message     (operator port: telegram.Bot)
+        |     +-> sandbox_*        (docker.Sandbox)
+        |     +-> email_fetch      (short-lived imap.Client per call)
+        |     +-> context_status   (token usage + kobold.Client.Perf if detected)
+        |     +-> get_time         (current timestamp)
+        |     +-> sleep            (suspend N seconds, interrupted by operator messages)
+        |
+        +-> Graceful shutdown (on first SIGINT)
+              +-> Inject shutdown prompt
+              +-> Agent saves state (up to 10 turns, 2min timeout)
 ```
 
 ## Module Details
 
-### main.go (117 lines)
+### cmd/faultline/main.go
 
-Entry point. Parses the `-config` flag, loads TOML configuration, sets up dual logging (console at configurable level, file always at DEBUG with daily rotation), implements two-phase shutdown via signal handling, optionally starts the Telegram bot, creates the `Agent`, and calls `agent.Run()`.
+The composition root. It is the only place in the codebase that knows which adapter implements which port.
 
-The two-phase shutdown works by maintaining two channels: `shutdownCh` (closed on first signal) and a context cancellation (on second signal). The agent checks `shutdownCh` at the top of each turn.
+Responsibilities:
+- Parse the `-config` flag, load TOML config.
+- Build the `slog.Logger` (console at configured level, file at DEBUG with daily rotation).
+- Set up two-phase shutdown via signal handling (first signal closes a channel; second cancels the parent context).
+- Construct each concrete adapter (`fs.Store`, `bm25.Index`, `openai.Client`, `kobold.Client` with best-effort detection, `telegram.Bot` if configured, `docker.Sandbox` if enabled, `jsonfile.Persister`, `tools.Executor`).
+- Wire them into `agent.New` via the `agent.Deps` struct.
+- Defer Close on resources whose lifecycle outlives the agent loop (sandbox, chat log).
+- Run the agent.
 
-### agent.go (512 lines)
+### internal/agent/
 
-The `Agent` struct and its operation loop. Key components:
+The hexagon. Pure domain logic with no I/O outside what the ports allow.
 
-- **`Agent` struct**: Holds references to all subsystems (`LLMClient`, `MemoryStore`, `SearchIndex`, `ToolExecutor`, `Telegram`, `Sandbox`, optional `KoboldExtras`).
-- **`NewAgent()`**: Initializes all subsystems, builds the initial search index from existing memory files. If `kobold_extras` is enabled in config, attempts a 5s detection probe against `/api/extra/version`; on failure the kobold pointer stays nil and the agent uses heuristic token counts.
-- **`countMessageTokens()`**: Single chokepoint for all token estimation. Uses the real KoboldCpp tokenizer when available, falls back to `EstimateMessagesTokens` otherwise. Bounded by a 5s timeout.
-- **`abortInFlight()`**: Called in the LLM-error path when the parent context was canceled (forced shutdown). Best-effort POST to KoboldCpp's `/api/extra/abort` so the model actually stops generating server-side. No-op when KoboldExtras isn't available.
-- **`Run()`**: The main infinite loop. Each iteration: checks for shutdown, injects pending collaborator messages, checks if compaction is needed, sends to LLM (without cancellation), then processes the response -- handling tool calls, deferring tool calls if a collaborator message arrived during generation, or injecting a continue prompt for plain text responses.
-- **`compactContext()`**: Injects the compaction prompt, gives the agent up to 10 turns to save state and produce a summary, then calls `rebuildContext()`.
-- **`rebuildContext()`**: Rebuilds the search index, reloads prompts (which may have been modified by the agent), gathers fresh context memories, and constructs a new message list.
-- **`gracefulSave()`**: Similar to compaction but triggered by shutdown signal, with a 2-minute timeout.
-- **`gatherContextMemories()`**: Returns the 5 most recently modified non-operational memory files to include in the system prompt.
-- **Collaborator messages mid-generation**: The LLM request is never cancelled. After a response comes back, any collaborator messages queued during generation are drained. If the response was text-only, the collaborator messages are appended in place of the continue prompt. If the response contained tool calls, each `tool_call_id` is satisfied with a "deferred" stub (required to keep the OpenAI message log valid) and the collaborator messages are appended -- letting the agent reply first and decide whether to re-issue the deferred calls.
+- **`agent.go`**: the `Agent` struct, `New()` constructor, `Run()` loop, context compaction (`compactContext`, `rebuildContext`), idle-loop detection (`idleNudgeThreshold`, `idleForceCompactionThreshold`, `idleNudgePrompt`), graceful save (`gracefulSave`), token estimation (`countMessageTokens` -- routes to Tokenizer when available, heuristic otherwise), backend-perf logging.
 
-### config.go (126 lines)
+- **`ports.go`**: the interfaces the agent depends on. Adapters satisfy them structurally; nothing in `internal/adapters/...` imports `internal/agent`.
 
-Defines the `Config` struct with nested sections: `APIConfig`, `AgentConfig`, `TelegramConfig`, `LogConfig`, `SandboxConfig`. Includes a custom `duration` type that implements `encoding.TextUnmarshaler` for TOML duration strings (e.g., `"60s"`, `"5m"`). `DefaultConfig()` provides sensible defaults. `LoadConfig()` reads and parses the TOML file, with missing fields keeping defaults.
+  | Port | Implemented by | Notes |
+  |------|---------------|-------|
+  | `ChatModel` | `*openai.Client` | One method: `Chat`. |
+  | `Memory` | `*fs.Store` | Subset used by the agent loop. Tools deal with the richer fs.Store surface directly. |
+  | `Searcher` | `*bm25.Index` | Build only; tools call into the same index for richer ops. |
+  | `Operator` | `*telegram.Bot` | nil-allowed when no collaborator channel is configured. |
+  | `Tokenizer` | `*kobold.Client` | nil-allowed; agent falls back to heuristic. Includes `Perf()` for context_status diagnostics; returns `*kobold.PerfInfo` (intentional small leak documented in port comment). |
+  | `Tools` | `*tools.Executor` | ToolDefs, Execute, SetContextInfo, Close. |
+  | `StateStore` | `*jsonfile.Persister` | Save/Load conversation log; binds path + logger at construction. |
 
-### llm.go (273 lines)
+### internal/config/
 
-`LLMClient` is a hand-rolled HTTP client for the OpenAI-compatible `/v1/chat/completions` endpoint. We previously used `github.com/sashabaranov/go-openai`, but that library has no public API for injecting vendor-specific extras (`top_k`, `min_p`, `repetition_penalty`) into chat completion requests. Since the agent only needs one POST endpoint with no streaming, dropping the dependency was simpler than working around it. Key details:
+`config.Config` and its sub-structs (`APIConfig`, `AgentConfig`, `TelegramConfig`, etc.). `config.Load` reads a TOML file; `config.Default` returns sensible defaults. Includes a `duration` type that implements `encoding.TextUnmarshaler` so TOML strings like `"5m"` parse into `time.Duration`.
 
-- **Construction**: `NewLLMClient(apiURL, apiKey, model, logger)`. The HTTP client has no global timeout (a long generation may legitimately take many minutes); cancellation is driven by the caller's context. The Bearer token is set on each request when `apiKey` is non-empty.
-- **`ChatRequest`** is the public input. The `Model` field is filled in by the client from its configured value, so callers don't set it. Sampler fields (Temperature, TopP, PresencePenalty, FrequencyPenalty, Seed, MaxTokens, plus the vendor extensions TopK, MinP, RepetitionPenalty) use zero-value-omitted semantics: a 0 means "don't send, let the server decide." Seed=0 specifically means "unset" because random seeds are the typical default.
-- **`chatRequestWire`** is the internal JSON shape we POST. Kept separate so we control exactly which keys appear on the wire and with what `omitempty` behavior. Vendor extensions ride alongside the spec fields; servers that don't recognize them silently ignore them.
-- **`Chat()`**: marshals the wire struct, POSTs to `apiURL + "/chat/completions"`, parses non-2xx responses through an OpenAI-style error envelope before falling back to the raw body, decodes successful responses into a `ChatResponse`. Logs only new messages since the last call (avoids re-logging the full context on every turn).
-- **`EstimateTokens()` / `EstimateMessagesTokens()`**: rough heuristic of ~4 characters per token. Used as the fallback when KoboldCpp's real tokenizer isn't available.
+### internal/log/
 
-### openai.go (85 lines)
+- `log.Daily`: an `io.Writer` that auto-rotates to date-stamped files (`YYYY-MM-DD.log`). `log.NewDaily` and `log.NewDailyPrefixed` are the constructors. Thread-safe via mutex.
+- `log.MultiHandler`: a `slog.Handler` that fans records to multiple handlers (console + file).
 
-Wire-format types matching the OpenAI chat completions API. Defines `Message`, `ToolCall`, `FunctionCall`, `Tool`, `FunctionDef`, `ChatResponse`, `Choice`, plus the role constants (`RoleSystem`, `RoleUser`, `RoleAssistant`, `RoleTool`) and `ToolTypeFunction`. JSON tags match what `go-openai` used to write so existing state files continue to load without migration. Fields go-openai included that we don't use (Refusal, MultiContent, Name, ReasoningContent, the deprecated FunctionCall) are intentionally omitted -- `encoding/json` silently ignores unknown fields on Unmarshal, so legacy state files with those keys still parse cleanly.
+### internal/prompts/
 
-### kobold.go (260 lines)
+- Embedded default prompts in `templates/*.md`, compiled into the binary via `//go:embed`.
+- `prompts.Load(store, name)`: loads a single prompt, seeding the embedded default to the memory store on first run.
+- `prompts.LoadAll(store)`: loads all five prompts.
+- `prompts.Render(template, now)`: substitutes `{{TIME}}` placeholders.
+- `prompts.BuildCycleContext(systemPrompt, memories, now, charLimit)`: assembles the full system message with recent memory excerpts and truncation hints.
+- `prompts.Store` is a tiny interface (Read/Write) that `*fs.Store` satisfies structurally, so the prompts package doesn't import the memory adapter.
 
-`KoboldExtras` is an optional client for KoboldCpp-specific endpoints (`/api/extra/version`, `/api/extra/tokencount`, `/api/extra/abort`, `/api/extra/perf`) that sit alongside the OpenAI compatibility layer at the same base URL. Activated by `[api] kobold_extras = true` in config (default true). Key details:
+### internal/tools/
 
-- **Detection**: `Detect()` probes `/api/extra/version` at startup with a 5s timeout. Success marks the client as detected; failure leaves it unusable and the agent falls back to heuristics. The agent never depends on this client succeeding.
-- **`CountString` / `CountMessages`**: Real tokenization via `/api/extra/tokencount`. `CountMessages` concatenates message contents and tool-call payloads into a single batched request, then adds a small per-message constant (`koboldChatTemplateOverhead = 10`) to approximate chat-template scaffolding the tokenizer endpoint can't see. Falls back to the heuristic on any error.
-- **`Abort()`**: Best-effort POST to `/api/extra/abort`. Called from the agent's forced-shutdown path so the model actually stops generating instead of leaving the GPU pinned until the backend notices the client is gone.
-- **`Perf()`**: Returns recent backend performance info surfaced in `context_status`.
-- **Nil-safe receivers**: `Detected()` and `Version()` accept a nil `*KoboldExtras` so call sites in the agent and tools can use them without explicit nil checks.
+`tools.Executor` and all tool handlers. The largest package by line count.
 
-### memory.go (855 lines)
+- **`executor.go`**: `Executor` struct, `New()` constructor, `ToolDefs()` (tool registry advertised to the LLM), `Execute()` central dispatch, web fetching with custom HTML-to-markdown converter (~400 lines), `webCache` with TTL eviction, all `memory_*` / `sandbox_*` / utility (`get_time`, `sleep`, `send_message`, `context_status`) handlers.
+- **`wiki.go`**: `wiki_fetch` tool (MediaWiki API + plain-text extraction + cache).
+- **`html_test.go`**: HTML-to-markdown conversion tests.
 
-`MemoryStore` -- the largest file after `tools.go`. A full-featured file-based persistence layer. Key design:
+The Executor depends on adapter packages directly (memory/fs, sandbox/docker, operator/telegram, llm/kobold, email/imap). The agent depends on the Executor through the `Tools` port.
 
-- **Base directory**: All files stored under a configurable root (default `./memory`).
-- **Path normalization**: All paths are lowercased, cleaned, and verified to not escape the base directory. `.md` extension is auto-appended.
-- **Trash system**: Deletions move files to `.trash/` under the memory root. Supports restore and empty trash.
-- **Operations**: `Read` (with optional offset/lines for partial reads), `Write`, `Edit` (find-and-replace with optional replace-all), `Append`, `Insert` (before a line number), `Delete`, `Restore`, `Move`, `List` (with metadata), `Grep` (regex within a file), `AllFiles` (for indexing), `RecentFiles` (by modification time), `DirSize`.
-- **Thread safety**: Operations use the filesystem as the synchronization mechanism (no explicit mutexes).
-- **SearchResult**: Used both for search results and for passing recent memories to the system prompt builder.
+### internal/search/bm25/
 
-### index.go (278 lines)
+Pure-Go BM25 search index. `bm25.Index` (with `Build`, `Update`, `Remove`, `RemovePrefix`, `Search`) and `bm25.Result` (path/content/score). Standard k1=1.5, b=0.75. In-memory only -- rebuilt from disk on startup and after each context compaction.
 
-`SearchIndex` -- a pure-Go BM25 search engine. Key details:
+`bm25.Result` is also reused by the memory adapter for non-scored returns (RecentFiles, AllFiles); Score is left at zero in those cases. This is a small shared type, not a violation of the dependency direction (memory imports bm25, never the reverse).
 
-- **Tokenization**: Splits on non-alphanumeric boundaries, lowercases, filters out stop words and tokens shorter than 2 characters.
-- **BM25 parameters**: k1=1.5, b=0.75 (standard values).
-- **Operations**: `Build` (from a map of path->content), `Search` (returns scored results), `Update` (single document), `Remove`/`RemovePrefix`.
-- **In-memory only**: Rebuilt from disk on every startup and context rebuild.
+### internal/llm/
 
-### tools.go (2151 lines)
+Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated as the de facto domain language for LLM messaging: every plausible backend speaks it. See `Standards/Hexagonal-Architecture.md` for the "pragmatic exception" justification.
 
-The largest file. Contains all tool definitions and execution handlers. Key sections:
+- `Message`, `ToolCall`, `FunctionCall`, `Tool`, `FunctionDef`, `ChatResponse`, `Choice`.
+- Role constants (`RoleSystem`, `RoleUser`, `RoleAssistant`, `RoleTool`) and `ToolTypeFunction`.
+- `ChatRequest`: the agent-facing request type with sampler params (Temperature, TopP, TopK, MinP, RepetitionPenalty, etc.).
+- `EstimateTokens`, `EstimateMessagesTokens`: heuristic ~4-chars-per-token fallback when no real tokenizer is available.
 
-- **`ToolDefs()`** (~345 lines): Returns OpenAI tool definitions. Sandbox tools are conditionally included based on configuration.
-- **`ToolExecutor` struct**: Holds references to `MemoryStore`, `SearchIndex`, `Telegram`, `Sandbox`, plus a `webCache` for fetch results and a `contextTokens` field for reporting.
-- **`Execute()`**: Central dispatch -- parses the tool call arguments as JSON, switches on the function name, calls the appropriate handler.
-- **Web fetch** (~400 lines): Full HTTP client with custom HTML-to-markdown converter. Handles headings, lists (ordered/unordered), tables, blockquotes, code blocks, links, images, pre-formatted text, and more. Results are cached in a `webCache` with TTL and background eviction.
-- **Memory tool handlers**: Thin wrappers around `MemoryStore` methods, formatting results as human-readable strings.
-- **Sandbox tool handlers**: Delegate to the `Sandbox` struct methods.
-- **`context_status`**: Reports estimated token usage vs. maximum.
-- **`get_time`**: Returns the current timestamp.
-- **`sleep`**: Suspends the agent for N seconds. Polls `Telegram.HasPending()` every 500ms so an operator message wakes the sleep without draining the queue (the agent's normal between-turn drain handles it). Bounded by `agent.max_sleep` (default 15m); requests above the cap are clamped with a note in the result. Returns immediately if a collaborator message is already queued at entry.
+### internal/adapters/llm/openai/
 
-### telegram.go (217 lines)
+`openai.Client` is a hand-rolled HTTP client for `/v1/chat/completions`. We previously used `github.com/sashabaranov/go-openai` but dropped it because it has no public API for vendor-specific extras (`top_k`, `min_p`, `repetition_penalty`).
 
-`Telegram` struct for bidirectional collaborator communication:
+- `chatRequestWire` is the JSON shape POSTed; the agent never sees it.
+- Vendor extension fields ride alongside the spec fields with `omitempty`; servers that don't recognize them silently ignore them.
+- Bearer token set when configured; no global HTTP timeout (long generations are legitimate; cancellation is via the caller's context).
+- `ChatLogger` lives here too: human-readable transcript of every request/response, separate from the slog debug log. One file per day (`chat-YYYY-MM-DD.log`). Nil-safe so callers can omit the chat logger.
 
-- **Incoming**: Long-polls for updates via `GetUpdatesChan()`. Only accepts messages from the configured chat ID. Queues messages in a mutex-protected slice for the agent to drain on its next turn boundary.
-- **Outgoing**: Converts markdown to Telegram MarkdownV2 using `goldmark-tgmd`. Auto-chunks messages at 4000 characters (below the 4096 limit), splitting at UTF-8 boundaries and preferring newline breaks. Falls back to plain text if MarkdownV2 conversion or sending fails.
-- **`Pending()`**: Drains and returns all queued messages atomically.
+### internal/adapters/llm/kobold/
 
-### sandbox.go (736 lines)
+`kobold.Client` for KoboldCpp-specific endpoints (`/api/extra/version`, `/api/extra/tokencount`, `/api/extra/abort`, `/api/extra/perf`).
 
-`Sandbox` -- Docker-based Python execution:
+- `Detect()` probes `/api/extra/version` at startup with a 5s timeout. Failure leaves the client unusable; main.go discards it and the agent falls back to heuristics.
+- `CountString` / `CountMessages` use the real tokenizer plus a small per-message overhead constant (`chatTemplateOverhead = 10`) to approximate chat-template scaffolding.
+- `Abort()` lets forced-shutdown actually stop generation server-side.
+- `Perf()` returns `*PerfInfo` consumed by `context_status` and the agent's `logBackendPerf`.
+- Nil-safe on `Detected()` and `Version()` so callers can skip explicit nil checks.
+- `StopReasonString(int) string` maps integer stop codes to human labels.
 
-- **Directory structure**: Flat layout with `scripts/`, `input/`, `output/` subdirectories. A `pyproject.toml` is seeded on init.
-- **Container lifecycle**: Ephemeral containers created per operation (`docker run --rm`). Uses the host UID/GID for file ownership.
-- **Security**: Filenames validated against a strict regex pattern (`^[a-z0-9][a-z0-9._-]*$`). Network access configurable. Memory limits enforced via Docker.
-- **Package management**: Uses `uv` (fast Python package manager). Supports install, upgrade, and remove. Dependencies tracked in `pyproject.toml`.
-- **Execution**: Scripts run with a configurable timeout. stdout/stderr captured and returned. Execution is logged to daily log files.
-- **File operations**: Read, write, list, and delete files within the sandbox folders.
+### internal/adapters/memory/fs/
 
-### prompt.go (125 lines)
+`fs.Store` is the file-based memory store.
 
-Manages the mutable prompt system:
+- All paths lowercased, cleaned, and verified to not escape the base directory. `.md` extension is auto-appended.
+- Soft delete via `.trash/` under the memory root; supports restore and empty trash.
+- Operations: `Read`, `ReadLines`, `Write`, `Edit` (find-and-replace, optional replace-all), `Append`, `Insert`, `Delete`, `Restore`, `Move`, `List`, `Grep`, `AllFiles`, `RecentFiles`, `Stat`, `DirSize`, `ListTrash`, `EmptyTrash`.
+- Thread safety via the filesystem (no explicit mutexes).
+- `IsTrashPath(path) bool` is exported for the agent's `isOperationalFile` check.
 
-- **Embedding**: Default prompts are compiled into the binary via `//go:embed` directives from `prompts/*.md`.
-- **Seeding**: On first run, defaults are written to the memory store. Subsequent runs load from disk, allowing the agent to have modified them.
-- **Template rendering**: `RenderPrompt()` substitutes `{{TIME}}` with the current timestamp.
-- **`BuildCycleContext()`**: Assembles the full system message by combining the system prompt, current timestamp, and up to 5 recent memories. Each memory is clipped to `Limits.RecentMemoryChars` (default 8000); a non-positive value disables the cap. When clipped, a retrieval hint is appended naming the file and suggesting a `memory_read` offset to resume from. The same pattern is used by `memory_search` (`Limits.MemorySearchResultChars`, default 6000) and sandbox script/shell output (`Limits.SandboxOutputChars`, default 64000).
+### internal/adapters/operator/telegram/
 
-### log.go (133 lines)
+`telegram.Bot` for bidirectional collaborator communication.
 
-- **`DailyFileWriter`**: An `io.Writer` that auto-rotates to date-stamped files (`YYYY-MM-DD.log`). Supports an optional filename prefix (used by sandbox logs). Thread-safe via mutex.
-- **`MultiHandler`**: A `slog.Handler` that fans log records to multiple handlers. Used to combine console output (at configurable level) with file output (always at DEBUG).
+- Long-polls for updates via `GetUpdatesChan()`. Only accepts messages from the configured chat ID.
+- Outgoing messages use markdown-to-Telegram-MarkdownV2 conversion (`goldmark-tgmd`); auto-chunks at 4000 chars.
+- `Pending()` drains the queue atomically; `HasPending()` peeks without draining (used by the `sleep` tool to wake on operator input without stealing the message from the agent's normal between-turn drain).
+
+### internal/adapters/sandbox/docker/
+
+`docker.Sandbox` for Docker-backed Python execution.
+
+- Flat directory layout: `scripts/`, `input/`, `output/` plus a seeded `pyproject.toml`.
+- Ephemeral containers per operation (`docker run --rm`). Host UID/GID mapping for file ownership.
+- Filenames validated against a strict regex (`^[a-z0-9][a-z0-9._-]*$`).
+- Network access toggleable; memory limits enforced.
+- `uv` for fast Python package management. Install/upgrade/remove tracked in `pyproject.toml`.
+- Execution log written to `sandbox-YYYY-MM-DD.log` (separate from the main slog stream).
+
+### internal/adapters/email/imap/
+
+`imap.Client` wraps a go-imap dialer. Connections are short-lived: `New()` -> `FetchOverviews` or `FetchBody` -> `Close()`. The `email_fetch` tool handler in tools.go creates one per request.
+
+### internal/adapters/state/jsonfile/
+
+- `Save(path, messages, idleStreak)` and `Load(path, logger)`: package functions that do the actual filesystem work. Atomic writes via temp file + rename. Bad files are quarantined with a `.bad-<unix>` suffix on parse error or version mismatch.
+- `Persister`: small wrapper that binds path + logger at construction so the agent can call `Save`/`Load` through the `StateStore` port without re-passing them.
+- `sanitizeMessages`: strips trailing partial turns (assistant messages with unsatisfied `tool_call_id`s) so the resumed log is always a valid replay.
 
 ## Key Design Patterns
 
-1. **Continuous autonomous operation**: The agent runs indefinitely without human prompting. There is no request-response cycle -- it just keeps going.
+1. **Hexagonal architecture (ports & adapters)**: see `Standards/Hexagonal-Architecture.md` in the user's vault. The agent depends only on interfaces it owns; adapters implement those interfaces structurally.
 
-2. **Context compaction**: When the conversation grows too large, the agent saves state and summarizes, then context is rebuilt. This enables indefinite operation within a fixed context window.
+2. **Continuous autonomous operation**: the agent runs indefinitely. There is no request-response cycle.
 
-3. **Self-modifying prompts**: The agent can read and rewrite its own system prompt and other operational prompts via the memory system. Changes take effect on the next context rebuild (compaction or restart).
+3. **Context compaction**: when the conversation grows too large, the agent saves state and summarizes; context is rebuilt from system prompt + summary + fresh memories. This enables indefinite operation within a fixed context window.
 
-4. **Two-phase shutdown**: First signal triggers graceful state-saving; second signal forces immediate exit. The agent has up to 10 turns and 2 minutes to save.
+4. **Self-modifying prompts**: the agent can read and rewrite its own system/operational prompts via the memory tools. Changes take effect on the next context rebuild.
 
-5. **Cooperative collaborator handoff**: Incoming Telegram messages never cancel an in-flight LLM request. The agent finishes its current thought, then on the next opportunity (after a text response, or as a deferral of tool calls) the collaborator message is injected, so the model can respond before deciding whether to continue its previous plan.
+5. **Two-phase shutdown**: first signal triggers graceful state-saving via the Tools port (model gets up to 10 turns, 2 min); second signal forces immediate exit.
 
-6. **Soft delete with trash**: Memory files are moved to `.trash/` on delete rather than being permanently removed, enabling restoration.
+6. **Cooperative collaborator handoff**: incoming Telegram messages never cancel an in-flight LLM request. The agent finishes its current thought, then on the next opportunity (after a text response, or as a deferral of tool calls) the collaborator message is injected.
 
-7. **Single package**: All code is in `package main` with no internal packages. Each file is a logical module. This keeps the project simple but means all types are in the same namespace.
+7. **Soft delete with trash**: memory files move to `.trash/` on delete, restorable until `EmptyTrash`.
+
+8. **De facto wire shape as domain type**: the OpenAI chat-completions Message/Tool/ToolCall shapes live in `internal/llm/` and are used end-to-end. The pragmatic exception is documented in the architecture standard. This is honest, not a leaky abstraction: every plausible backend speaks this shape.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `github.com/BurntSushi/toml` | TOML configuration parsing |
+| `github.com/BurntSushi/toml` | TOML config |
 | `github.com/go-telegram-bot-api/telegram-bot-api/v5` | Telegram bot API |
-| `github.com/Mad-Pixels/goldmark-tgmd` | Markdown to Telegram MarkdownV2 |
-| `golang.org/x/net` | HTML parsing for web_fetch |
-| `github.com/yuin/goldmark` | Markdown parser (indirect, used by goldmark-tgmd) |
+| `github.com/Mad-Pixels/goldmark-tgmd` | Markdown -> Telegram MarkdownV2 |
+| `github.com/BrianLeishman/go-imap` | IMAP client |
+| `golang.org/x/net/html` | HTML parsing for web_fetch |
+| `github.com/yuin/goldmark` | Markdown (indirect, used by goldmark-tgmd) |
 
-The OpenAI-compatible chat completions client is hand-rolled in `llm.go` + `openai.go` (no SDK dependency).
+The OpenAI-compatible chat completions client is hand-rolled in `internal/adapters/llm/openai/` (no SDK).
 
 ## Runtime Dependencies
 
-- **Docker**: Required for the sandbox feature. Must be available in PATH.
-- **Network access**: Required for the LLM API, web fetching, and Telegram.
-
-## Data Flow Summary
-
-1. **Startup**: Load config -> init memory store -> build BM25 index -> seed prompts -> start Telegram -> create agent -> enter loop.
-2. **Each turn**: Check shutdown -> inject collaborator messages -> check compaction -> send to LLM -> process tool calls or inject continue prompt.
-3. **Compaction**: Inject compaction prompt -> agent saves state via tools -> extract summary -> rebuild index -> reload prompts -> rebuild messages.
-4. **Shutdown**: Inject shutdown prompt -> agent saves state via tools -> exit.
+- **Docker**: required for the sandbox feature. Must be in PATH.
+- **Network access**: required for the LLM API, web fetching, Telegram, IMAP.
 
 ## Notes for Contributors
 
-- There are currently no tests in the project.
-- Token estimation is a rough heuristic (~4 chars/token), not a proper tokenizer.
-- All memory file paths are lowercased for case-insensitive access.
-- The HTML-to-markdown converter in `tools.go` is substantial (~400 lines) and handles most common HTML elements. It is not a third-party library.
-- The default API URL in `DefaultConfig()` points to a local network address -- change this for your setup.
-- The `webCache` runs a background goroutine for eviction; it is stopped via `Close()` when the `ToolExecutor` is closed.
+- Tests exist for `config`, `log`, `prompts`, `llm`, `bm25`, `openai` (chatlog), `kobold`, `memory/fs`, `operator/telegram`, `state/jsonfile`, and `tools` (HTML conversion). The `agent` package has no tests yet -- adding test seams is straightforward thanks to the ports.
+- The HTML-to-markdown converter in `internal/tools/executor.go` is substantial (~400 lines) and handles most common HTML elements. Not a third-party library.
+- The `webCache` runs a background goroutine for eviction; it is stopped via `Close()` when the `tools.Executor` is closed.
+- The default API URL in `config.Default()` points to a local network address -- change for your setup.
