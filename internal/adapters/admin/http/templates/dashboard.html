@@ -1,15 +1,5 @@
 {{define "content"}}
 <div class="flex flex-col gap-6 mt-4">
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h1 class="card-title">Welcome, {{.Username}}</h1>
-      <p class="opacity-70">
-        The Faultline admin UI is up. Future sections of this dashboard
-        will surface live agent state, tool-call history, configuration
-        editing, skill toggles, and self-update controls.
-      </p>
-    </div>
-  </div>
 
   <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
     <div class="stat bg-base-100 rounded-box shadow-sm">
@@ -23,24 +13,47 @@
       <div class="stat-desc">since {{.StartedAt}}</div>
     </div>
     <div class="stat bg-base-100 rounded-box shadow-sm">
-      <div class="stat-title">Active sessions</div>
+      <div class="stat-title">Active admin sessions</div>
       <div class="stat-value text-2xl">{{.SessionCount}}</div>
-      <div class="stat-desc">admin browsers signed in</div>
+      <div class="stat-desc">browsers signed in</div>
     </div>
   </div>
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title">Coming soon</h2>
-      <ul class="list-disc list-inside opacity-80">
-        <li>Primary agent + subagent live status (SSE)</li>
-        <li>Tool-call ring buffer feed</li>
-        <li>Configuration editing with validation</li>
-        <li>Skills enable/disable persisted to skills.toml</li>
-        <li>Token / request statistics</li>
-        <li>Self-update controls</li>
-      </ul>
+  <div id="agent-status"
+       hx-get="/admin/fragments/status"
+       hx-trigger="load, every 1s"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body">
+        <div class="skeleton h-6 w-48 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
     </div>
   </div>
+
+  <div id="subagents"
+       hx-get="/admin/fragments/subagents"
+       hx-trigger="load, every 2s"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body">
+        <div class="skeleton h-6 w-32 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tool-feed"
+       hx-get="/admin/fragments/tools"
+       hx-trigger="load, every 1s"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body">
+        <div class="skeleton h-6 w-40 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
+    </div>
+  </div>
+
 </div>
 {{end}}

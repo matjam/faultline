@@ -114,4 +114,9 @@ type Subagents interface {
 	// every context rebuild for consistency with how skills are
 	// surfaced.
 	Profiles() []subagent.Profile
+
+	// ActiveCount returns the number of currently-running spawned
+	// children. Cheap (atomic load); called from the loop's
+	// per-iteration inspector update.
+	ActiveCount() int
 }

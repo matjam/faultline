@@ -24,12 +24,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"runtime"
 	"sync"
 	"time"
 
 	"github.com/matjam/faultline/internal/adapters/auth/users"
-	"github.com/matjam/faultline/internal/version"
 )
 
 // Deps bundles the dependencies the composition root injects.
@@ -52,6 +50,20 @@ type Deps struct {
 
 	// Logger is the shared slog logger.
 	Logger *slog.Logger
+
+	// Agent is the live primary agent inspector. nil-allowed: when
+	// not wired the dashboard renders empty placeholders. Stage 3
+	// onward expects this to be set.
+	Agent AgentInspector
+
+	// Subagents is the live subagent.Manager inspector. nil-allowed
+	// when [subagent] is disabled.
+	Subagents SubagentInspector
+
+	// Tools is the in-memory tool-call ring buffer. The same
+	// instance is wired into the primary's tools.Executor as the
+	// Observer, so the admin UI sees every dispatch. nil-allowed.
+	Tools *ToolBuffer
 }
 
 // Server is the HTTP admin UI server. Construct with New, run with
@@ -59,6 +71,7 @@ type Deps struct {
 type Server struct {
 	deps      Deps
 	templates map[string]*template.Template // contentName -> layout+content combined
+	fragments map[string]*template.Template // fragName -> standalone template
 	staticSub fs.FS
 
 	srv      *http.Server
@@ -77,6 +90,16 @@ type Server struct {
 var contentTemplates = []string{
 	"login.html",
 	"dashboard.html",
+}
+
+// fragmentTemplates are stand-alone HTMX-fragment templates rendered
+// without a surrounding layout. Each file defines a single named
+// template (matching the file's basename minus .html) which the
+// fragment handlers execute.
+var fragmentTemplates = []string{
+	"frag_status.html",
+	"frag_tools.html",
+	"frag_subagents.html",
 }
 
 // New parses templates and prepares the static-file sub-FS. Returns
@@ -100,17 +123,32 @@ func New(deps Deps) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("adminhttp: read layout: %w", err)
 	}
+	funcs := templateFuncs()
+
 	tmpls := make(map[string]*template.Template, len(contentTemplates))
 	for _, name := range contentTemplates {
 		contentBytes, err := fs.ReadFile(templateFS, "templates/"+name)
 		if err != nil {
 			return nil, fmt.Errorf("adminhttp: read %s: %w", name, err)
 		}
-		t, err := template.New(name).Parse(string(layoutBytes) + string(contentBytes))
+		t, err := template.New(name).Funcs(funcs).Parse(string(layoutBytes) + string(contentBytes))
 		if err != nil {
 			return nil, fmt.Errorf("adminhttp: parse %s: %w", name, err)
 		}
 		tmpls[name] = t
+	}
+
+	frags := make(map[string]*template.Template, len(fragmentTemplates))
+	for _, name := range fragmentTemplates {
+		fragBytes, err := fs.ReadFile(templateFS, "templates/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("adminhttp: read %s: %w", name, err)
+		}
+		t, err := template.New(name).Funcs(funcs).Parse(string(fragBytes))
+		if err != nil {
+			return nil, fmt.Errorf("adminhttp: parse %s: %w", name, err)
+		}
+		frags[name] = t
 	}
 
 	staticSub, err := fs.Sub(staticFS, "assets")
@@ -118,7 +156,7 @@ func New(deps Deps) (*Server, error) {
 		return nil, fmt.Errorf("adminhttp: sub-fs assets: %w", err)
 	}
 
-	return &Server{deps: deps, templates: tmpls, staticSub: staticSub}, nil
+	return &Server{deps: deps, templates: tmpls, fragments: frags, staticSub: staticSub}, nil
 }
 
 // Run binds the listener and serves until ctx is canceled or
@@ -164,6 +202,23 @@ func (s *Server) Shutdown() {
 	s.shutdown()
 }
 
+// SetInspectors swaps in the live agent + subagent inspectors after
+// construction. Used by the composition root because the agent
+// constructor in turn depends on the tools.Executor (which we feed
+// the admin's ToolBuffer), so the order has to be:
+//
+//  1. build admin (owns the tool buffer)
+//  2. build tools.Executor with admin's tool buffer as Observer
+//  3. build agent on top of the executor
+//  4. attach inspectors back to admin
+//
+// Either argument may be nil; nil disables that section of the
+// dashboard rather than producing an error.
+func (s *Server) SetInspectors(agent AgentInspector, subs SubagentInspector) {
+	s.deps.Agent = agent
+	s.deps.Subagents = subs
+}
+
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
 		if s.srv == nil {
@@ -191,6 +246,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/{$}", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("GET /admin", s.requireAuth(s.handleDashboard))
 
+	// Live HTMX fragments. Polled by the dashboard at low frequency
+	// (1–2s) so the operator sees fresh state without the cost of
+	// SSE plumbing. All require auth.
+	mux.HandleFunc("GET /admin/fragments/status", s.requireAuth(s.handleFragStatus))
+	mux.HandleFunc("GET /admin/fragments/tools", s.requireAuth(s.handleFragTools))
+	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
+
 	// Anything not under /admin gets 404. We intentionally don't
 	// take over /; the agent doesn't expose anything else on this
 	// port, and forwarding "/" to "/admin" would trip up reverse
@@ -200,42 +262,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	})
 }
 
-// dashboardData is the template data for the stub dashboard. Will
-// expand significantly as inspector ports come online.
-type dashboardData struct {
-	Title         string
-	Authenticated bool
-	Username      string
-	CSRFToken     string
-
-	Version      string
-	GoVersion    string
-	StartedAt    string
-	Uptime       string
-	SessionCount int
-}
-
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromContext(r.Context())
-	uptime := time.Since(s.deps.StartedAt).Round(time.Second)
-	data := dashboardData{
-		Title:         "Dashboard",
-		Authenticated: true,
-		Username:      sess.Username,
-		CSRFToken:     sess.CSRFToken,
-		Version:       version.String(),
-		GoVersion:     runtime.Version(),
-		StartedAt:     s.deps.StartedAt.UTC().Format(time.RFC3339),
-		Uptime:        uptime.String(),
-		SessionCount:  s.deps.Sessions.Count(),
-	}
-	s.render(w, "dashboard.html", data)
 }
 
 // render executes the layout template for the named content. Each

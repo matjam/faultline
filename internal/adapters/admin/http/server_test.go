@@ -215,8 +215,18 @@ func TestServer_FullLoginAndDashboard(t *testing.T) {
 		t.Fatalf("dashboard status = %d, want 200", resp.StatusCode)
 	}
 	body, _ = io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "Welcome, admin") {
-		t.Fatalf("dashboard body missing welcome text: %s", body)
+	// The dashboard's dynamic content arrives via HTMX-fragment
+	// loads after first paint; the static shell carries the navbar
+	// (with the signed-in username) and the version/uptime stats
+	// header. Assert on those.
+	if !strings.Contains(string(body), "signed in as") {
+		t.Fatalf("dashboard body missing navbar signed-in text: %s", body)
+	}
+	if !strings.Contains(string(body), "Faultline version") {
+		t.Fatalf("dashboard body missing version stat header: %s", body)
+	}
+	if !strings.Contains(string(body), `id="agent-status"`) {
+		t.Fatalf("dashboard body missing agent-status fragment slot: %s", body)
 	}
 }
 

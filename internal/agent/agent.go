@@ -44,6 +44,11 @@ type Agent struct {
 	// subagent_report to terminate the child loop after the report
 	// has been delivered.
 	stopRequested atomic.Bool
+
+	// inspector carries the observable state Snapshot() exposes.
+	// Populated in New so non-loop goroutines (e.g. the admin
+	// server) can take a Snapshot before Run has even started.
+	inspector *inspectorState
 }
 
 // Deps bundles the agent's port dependencies. Constructing the Agent
@@ -93,6 +98,7 @@ func New(cfg *config.Config, deps Deps, logger *slog.Logger) *Agent {
 		logger:               logger,
 		maxTurns:             deps.MaxTurns,
 		systemPromptOverride: deps.SystemPromptOverride,
+		inspector:            newInspectorState(time.Now()),
 	}
 }
 
@@ -270,12 +276,18 @@ func (a *Agent) logBackendPerf() {
 func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 	a.logger.Info("=== agent starting continuous operation ===")
 
+	a.setPhase(PhaseInitializing)
+	// Mark stopped on every return path so the admin UI can
+	// distinguish a live loop from one that exited.
+	defer a.setPhase(PhaseStopped)
+
 	// Build initial context. When state persistence is enabled and a
 	// saved file exists, this resumes the conversation log; otherwise it
 	// returns a fresh context. idleStreak is restored from the same file
 	// so loop-detection survives restarts.
 	messages, prompts, idleStreak, err := a.initializeContext()
 	if err != nil {
+		a.recordError(err)
 		return err
 	}
 
@@ -341,6 +353,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-shutdownCh:
+			a.setPhase(PhaseSaving)
 			return a.handleShutdown(ctx, messages, toolDefs, prompts)
 		default:
 		}
@@ -356,13 +369,29 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 
 		// Check if compaction is needed
 		tokenEst := a.countMessageTokens(messages)
+
+		// Record this iteration's observable state for the inspector.
+		// Done after token count so the snapshot reflects the value
+		// the loop actually used to make compaction decisions.
+		// ActiveCount is a cheap atomic load on the Subagents port;
+		// we don't surface a count for the operator queue because
+		// Operator.Pending drains and exposing a parallel peek
+		// would broaden the port for one UI field.
+		activeSubagents := 0
+		if a.subagents != nil {
+			activeSubagents = a.subagents.ActiveCount()
+		}
+		a.recordIterationTop(len(messages), tokenEst, idleStreak, 0, activeSubagents)
 		if tokenEst > a.cfg.Agent.CompactionThreshold {
 			a.logger.Warn("context at compaction threshold, compacting",
 				"tokens_est", tokenEst, "threshold", a.cfg.Agent.CompactionThreshold)
+			a.setPhase(PhaseCompacting)
 			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
+				a.recordError(err)
 				return err
 			}
+			a.setPhase(PhaseIdle)
 			idleStreak = 0
 			continue
 		}
@@ -371,10 +400,13 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if tokenEst > int(float64(a.cfg.Agent.MaxTokens)*0.95) {
 			a.logger.Warn("context at hard limit, forcing compaction",
 				"tokens_est", tokenEst, "max", a.cfg.Agent.MaxTokens)
+			a.setPhase(PhaseCompacting)
 			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
+				a.recordError(err)
 				return err
 			}
+			a.setPhase(PhaseIdle)
 			idleStreak = 0
 			continue
 		}
@@ -386,10 +418,13 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if idleStreak >= idleForceCompactionThreshold {
 			a.logger.Warn("idle loop detected, forcing compaction",
 				"idle_streak", idleStreak, "tokens_est", tokenEst)
+			a.setPhase(PhaseCompacting)
 			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
+				a.recordError(err)
 				return err
 			}
+			a.setPhase(PhaseIdle)
 			idleStreak = 0
 			continue
 		}
@@ -424,8 +459,12 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// generation off mid-thought wastes tokens and discards the model's
 		// reasoning. Any collaborator messages that arrive during generation
 		// are handled after the response comes back (see below).
+		a.setPhase(PhaseGenerating)
+		chatStart := time.Now()
 		resp, err := a.chat.Chat(ctx, a.chatReq(messages, toolDefs))
+		chatLatency := time.Since(chatStart)
 		if err != nil {
+			a.recordChat(chatLatency, 0, 0, "", err)
 			// If the parent context was canceled (forced shutdown via
 			// second SIGINT), return the cancellation error verbatim so
 			// main.go's errors.Is(err, context.Canceled) filter recognizes
@@ -439,6 +478,14 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			}
 			return fmt.Errorf("llm chat: %w", err)
 		}
+
+		// Successful chat: capture stats. Finish reason is per-choice,
+		// taken from the first choice (matches the rest of the loop).
+		var finishReason string
+		if len(resp.Choices) > 0 {
+			finishReason = resp.Choices[0].FinishReason
+		}
+		a.recordChat(chatLatency, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, finishReason, nil)
 
 		msg := resp.Choices[0].Message
 		messages = append(messages, msg)
@@ -498,11 +545,14 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			// graceful shutdown) so long-running tools like sleep
 			// yield to a pending shutdown without waiting for ctx
 			// cancellation (which only happens on the second SIGINT).
+			a.setPhase(PhaseExecutingTool)
 			a.tools.SetContextInfo(a.countMessageTokens(messages))
 			for _, tc := range msg.ToolCalls {
 				result := a.tools.Execute(toolCtx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))
+				a.recordToolCall()
 			}
+			a.setPhase(PhaseIdle)
 			idleStreak = 0
 
 		case hasPending:
