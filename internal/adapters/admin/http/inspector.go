@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	skillsfs "github.com/matjam/faultline/internal/adapters/skills/fs"
 	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/subagent"
 	"github.com/matjam/faultline/internal/tools"
@@ -30,6 +31,16 @@ type AgentInspector interface {
 type SubagentInspector interface {
 	Status() []subagent.ActiveStatus
 	Profiles() []subagent.Profile
+}
+
+// SkillsAdmin is the read+write port the admin server uses to list
+// every skill in the catalog (including operator-disabled ones) and
+// toggle their state. Implemented by skills/fs.Store. nil-allowed:
+// when not wired, the Skills card on the dashboard renders a
+// disabled-feature placeholder.
+type SkillsAdmin interface {
+	ListAll() []skillsfs.AllSkill
+	SetEnabled(name string, enabled bool) error
 }
 
 // ToolBuffer is the in-memory ring buffer of recent tool-call events.

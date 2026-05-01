@@ -1,0 +1,74 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between">
+      <h2 class="card-title">Skills</h2>
+      {{if .HasSkills}}
+      <span class="text-sm opacity-70">
+        {{len .Skills}} discovered
+      </span>
+      {{else}}
+      <span class="badge badge-ghost">disabled</span>
+      {{end}}
+    </div>
+
+    {{if .FlashOK}}
+    <div class="alert alert-success py-2">
+      <span>{{.FlashOK}}</span>
+    </div>
+    {{end}}
+    {{if .FlashErr}}
+    <div class="alert alert-error py-2">
+      <span>{{.FlashErr}}</span>
+    </div>
+    {{end}}
+
+    {{if .HasSkills}}
+      {{if .Skills}}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th class="w-32">Enabled</th>
+              <th>Name</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Skills}}
+            <tr class="{{if .Disabled}}opacity-50{{end}}">
+              <td>
+                <form hx-post="/admin/skills/toggle"
+                      hx-target="#skills-card"
+                      hx-swap="innerHTML">
+                  <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                  <input type="hidden" name="name" value="{{.Name}}">
+                  <input type="checkbox" name="enabled"
+                         class="toggle toggle-success"
+                         {{if not .Disabled}}checked{{end}}
+                         onchange="this.form.requestSubmit();">
+                </form>
+              </td>
+              <td class="font-mono text-sm">{{.Name}}</td>
+              <td class="text-sm opacity-80">{{.Description}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="opacity-60 italic text-sm">
+        No skills discovered. Drop a skill folder into your skills
+        root and the agent will pick it up at the next context
+        rebuild.
+      </p>
+      {{end}}
+    {{else}}
+    <p class="opacity-70 text-sm">
+      Skills support is not enabled. Set
+      <code>[skills] enabled = true</code> in your config to turn
+      it on; once a SKILL.md is discovered it will appear here for
+      enable/disable toggling.
+    </p>
+    {{end}}
+  </div>
+</div>

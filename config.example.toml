@@ -411,9 +411,12 @@ bind = "127.0.0.1:8742"
 # first run (treat its contents as secret material — do not commit).
 users_file = "./users.toml"
 
-# Path to a small TOML file recording skill enable/disable state. Used
-# in a later stage by the admin UI's skills page; missing file means
-# "all skills enabled".
+# Path to a TOML file recording per-skill enable/disable state. The
+# admin UI's Skills card writes to this file when an operator toggles
+# a skill off. Disabled skills are hidden from the agent's catalog
+# (the agent does not see them in its system prompt and cannot run
+# them via skill_activate). Missing file = no skills disabled. Only
+# meaningful when [skills] is also enabled.
 skills_file = "./skills.toml"
 
 # Idle session TTL. Sessions older than this with no activity are
