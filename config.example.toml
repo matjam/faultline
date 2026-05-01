@@ -270,3 +270,46 @@ timeout = "30s"
 # and ignore this. OpenAI accepts up to 2048 inputs per call but smaller
 # batches keep individual failures localized.
 batch_size = 100
+
+# ---------------------------------------------------------------------------
+# [skills] — Agent Skills support (https://agentskills.io).
+#
+# When enabled, Faultline scans <dir>/<skill-name>/SKILL.md at startup and
+# on every context rebuild, injects each skill's name + description into
+# the system prompt's "Available Skills" section, and advertises four
+# tools to the LLM: skill_activate (load full instructions), skill_read
+# (read a bundled resource file), skill_execute (run a command in an
+# isolated container with only the skill's directory mounted), and
+# skill_work_read (fetch files the skill produced in its per-call /work
+# scratch dir).
+#
+# Skills are operator-supplied and implicitly trusted: anything dropped
+# into Dir is fair game for the agent. Skill execution always runs
+# through the [sandbox] feature, which must be enabled separately for
+# skill_execute to function. Each skill_execute call mounts only its
+# own skill directory at /skill (read-only), the regular sandbox /cache
+# at /cache (read-write, for shared package caches), and a fresh per-
+# call /work directory at /work (read-write, wiped on agent restart).
+# Skills cannot see the agent's memory or other skills' directories.
+# ---------------------------------------------------------------------------
+[skills]
+enabled = false
+
+# Root directory under which each skill lives in its own subfolder, e.g.
+# <dir>/pdf-processing/SKILL.md. A missing directory is not an error -- the
+# catalog stays empty until the operator drops skills in.
+dir = "./skills"
+
+# Allow the agent to install new skills autonomously via the
+# skill_install tool. When false (the default), skill_install is not
+# advertised at all and the operator must drop skills into Dir manually.
+# When true, the agent can fetch skills from tarball URLs (.tar.gz, .tgz,
+# .tar, .zip) or git repositories (.git URLs, git@ URLs, git+https://, or
+# plain GitHub repo URLs) into Dir. The download is extracted to a temp
+# directory, validated (must contain a SKILL.md that parses cleanly),
+# then moved into the skills root. Existing skills are NOT overwritten.
+# Caps: 50 MiB max download, 5 min total timeout, path-traversal guards
+# on archive entries. Even with this on, the agent's reach is bounded by
+# the standard sandbox feature -- skill_execute still runs every script
+# in an isolated container with only the skill's own directory mounted.
+install_enabled = false

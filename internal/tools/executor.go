@@ -26,6 +26,7 @@ import (
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
+	skillsfs "github.com/matjam/faultline/internal/adapters/skills/fs"
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
@@ -953,6 +954,13 @@ func (te *Executor) ToolDefs() []llm.Tool {
 		)
 	}
 
+	// Skills (Agent Skills support, https://agentskills.io). Tools are
+	// only advertised when the catalog has at least one entry; an empty
+	// skill_* tool surface confuses the model per the spec.
+	if defs := te.skillToolDefs(); len(defs) > 0 {
+		tools = append(tools, defs...)
+	}
+
 	return tools
 }
 
@@ -970,51 +978,66 @@ func indexKey(path string) string {
 
 // Executor handles executing tool calls.
 type Executor struct {
-	memory         *fs.Store
-	index          *bm25.Index
-	telegram       *telegram.Bot
-	sandbox        *docker.Sandbox
-	email          *config.EmailConfig
-	kobold         *kobold.Client  // optional; nil means no perf info in context_status
-	updater        *update.Updater // optional; always non-nil but Enabled() may be false
-	embedder       Embedder        // optional; nil means semantic search disabled
-	vIndex         *vector.Index   // optional; nil means semantic search disabled
-	embedBatchSize int             // batch size for bulk embed calls (rebuild_indexes); 0 -> default
-	logger         *slog.Logger
-	http           *http.Client
-	cache          *webCache
-	maxTokens      int
-	currentTokens  int
-	limits         config.LimitsConfig
-	maxSleep       time.Duration // upper bound for the `sleep` tool
+	memory              *fs.Store
+	index               *bm25.Index
+	telegram            *telegram.Bot
+	sandbox             *docker.Sandbox
+	email               *config.EmailConfig
+	kobold              *kobold.Client  // optional; nil means no perf info in context_status
+	updater             *update.Updater // optional; always non-nil but Enabled() may be false
+	embedder            Embedder        // optional; nil means semantic search disabled
+	vIndex              *vector.Index   // optional; nil means semantic search disabled
+	skills              *skillsfs.Store // optional; nil means skills support disabled
+	skillInstallEnabled bool            // when false, skill_install is not advertised or executable
+	skillsRoot          string          // absolute path to the skills root; empty when skills disabled
+	embedBatchSize      int             // batch size for bulk embed calls (rebuild_indexes); 0 -> default
+	logger              *slog.Logger
+	http                *http.Client
+	cache               *webCache
+	maxTokens           int
+	currentTokens       int
+	limits              config.LimitsConfig
+	maxSleep            time.Duration // upper bound for the `sleep` tool
 }
 
-// New creates a new tool executor. kb, embedder, and vIndex may be nil.
-// embedder and vIndex must be both nil (feature off) or both non-nil
-// (feature on); main.go is responsible for that pairing.
+// New creates a new tool executor. kb, embedder, vIndex, and skills may
+// be nil. embedder and vIndex must be both nil (feature off) or both
+// non-nil (feature on); main.go is responsible for that pairing.
 //
 // embedBatchSize is the batch size used by the rebuild_indexes tool;
 // values <= 0 fall back to a sensible default inside the build helper.
-func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, embedBatchSize int, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
+//
+// skillInstallEnabled gates the skill_install tool. When skills is nil
+// it has no effect; when both skills and skillInstallEnabled are set
+// the tool is advertised and the agent can fetch skills from tarball
+// URLs or git repositories.
+func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, skills *skillsfs.Store, skillInstallEnabled bool, embedBatchSize int, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
 	if sb != nil {
 		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
+	skillsRoot := ""
+	if skills != nil {
+		skillsRoot = skills.Root()
+	}
 	return &Executor{
-		memory:         memory,
-		index:          index,
-		telegram:       tg,
-		sandbox:        sb,
-		email:          email,
-		kobold:         kb,
-		updater:        updater,
-		embedder:       embedder,
-		vIndex:         vIndex,
-		embedBatchSize: embedBatchSize,
-		logger:         logger,
-		maxTokens:      maxTokens,
-		limits:         limits,
-		maxSleep:       maxSleep,
-		cache:          newWebCache(60 * time.Second),
+		memory:              memory,
+		index:               index,
+		telegram:            tg,
+		sandbox:             sb,
+		email:               email,
+		kobold:              kb,
+		updater:             updater,
+		embedder:            embedder,
+		vIndex:              vIndex,
+		skills:              skills,
+		skillInstallEnabled: skillInstallEnabled,
+		skillsRoot:          skillsRoot,
+		embedBatchSize:      embedBatchSize,
+		logger:              logger,
+		maxTokens:           maxTokens,
+		limits:              limits,
+		maxSleep:            maxSleep,
+		cache:               newWebCache(60 * time.Second),
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -1144,6 +1167,17 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 		return te.sandboxListPackages()
 	case "sandbox_shell":
 		return te.sandboxShell(ctx, args)
+	// Skill tools (https://agentskills.io)
+	case "skill_activate":
+		return te.skillActivate(args)
+	case "skill_read":
+		return te.skillRead(args)
+	case "skill_execute":
+		return te.skillExecute(ctx, args)
+	case "skill_work_read":
+		return te.skillWorkRead(args)
+	case "skill_install":
+		return te.skillInstall(ctx, args)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}

@@ -6,6 +6,7 @@ import (
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/skills"
 )
 
 // ChatModel is the LLM port. The agent does not care which backend
@@ -79,4 +80,18 @@ type Tools interface {
 type StateStore interface {
 	Save(messages []llm.Message, idleStreak int) error
 	Load() ([]llm.Message, int, error)
+}
+
+// Skills is the catalog port for Agent Skills support
+// (https://agentskills.io). The agent uses List() to inject the
+// tier-1 catalog into the system prompt and Reload() on context
+// rebuild so operator-dropped skills become visible without a
+// restart. Get/Read are not used by the agent loop directly; the
+// tools layer drives skill activation and resource reads.
+//
+// May be nil when skills support is disabled or the configured root
+// directory is unset.
+type Skills interface {
+	List() []skills.Skill
+	Reload() error
 }

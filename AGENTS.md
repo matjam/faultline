@@ -42,6 +42,9 @@ faultline/
       sandbox/docker/         Docker-based multi-runtime sandbox
                               (image: docker/sandbox/Dockerfile, Arch-based,
                               ships uv/python/node/bun/deno/go + CLI tools)
+      skills/fs/              filesystem-backed Agent Skills catalog
+                              (https://agentskills.io); reads
+                              <root>/<name>/SKILL.md
       email/imap/             IMAP email client
       state/jsonfile/         JSON-file conversation persistence (Save/Load
                               + Persister wrapper that satisfies StateStore)
@@ -91,6 +94,15 @@ cmd/faultline/main.go
         |                            embeddings configured: dual sections)
         |     +-> send_message     (operator port: telegram.Bot)
         |     +-> sandbox_*        (docker.Sandbox)
+        |     +-> skill_activate   (skills/fs.Store; loads SKILL.md body)
+        |     +-> skill_read       (skills/fs.Store; reads bundled resource)
+        |     +-> skill_execute    (docker.Sandbox.ExecuteIsolated with
+        |                            /skill ro + per-call /work rw + /cache)
+        |     +-> skill_work_read  (reads files from a previous skill_execute's
+        |                            /work directory by call_id)
+        |     +-> skill_install    (optional; fetches tarball/git URL into
+        |                            skills root, validates SKILL.md, reloads
+        |                            catalog. Gated on [skills] install_enabled)
         |     +-> email_fetch      (short-lived imap.Client per call)
         |     +-> context_status   (token usage + kobold.Client.Perf if detected)
         |     +-> get_time         (current timestamp)
@@ -136,6 +148,7 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
   | `Tokenizer` | `*kobold.Client` | nil-allowed; agent falls back to heuristic. Includes `Perf()` for context_status diagnostics; returns `*kobold.PerfInfo` (intentional small leak documented in port comment). |
   | `Tools` | `*tools.Executor` | ToolDefs, Execute, SetContextInfo, Close. |
   | `StateStore` | `*jsonfile.Persister` | Save/Load conversation log; binds path + logger at construction. |
+  | `Skills` | `*skillsfs.Store` | nil-allowed; List/Reload for the tier-1 catalog injection in `BuildCycleContext`. Tools layer drives the rest. |
 
 ### internal/config/
 
@@ -258,6 +271,19 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 - `sandbox_execute` drives Python via `uv` (`uv sync && uv run python /scripts/X`); `sandbox_shell` runs arbitrary `sh -c` commands so the agent can drive any other runtime on PATH directly.
 - Install/upgrade/remove tracked in `pyproject.toml` for the Python project; non-Python languages live entirely inside the container at runtime.
 - Execution log written to `sandbox-YYYY-MM-DD.log` (separate from the main slog stream).
+- `ExecuteIsolated(ctx, command, mounts, network, cwd, env)` is the building block for skill execution: a fresh `docker run --rm` with only the supplied bind-mounts (no `/scripts`, `/input`, `/output`, `/venv`, `/pyproject.toml`), respecting the same `--user UID:GID`, memory, and timeout settings as `Execute`/`ShellExec`. The skill_* tools use this with `/skill` (ro), `/cache` (rw), and a per-call `/work` (rw).
+- `SkillWorkRoot()` and `ResetSkillWork()` manage the per-call scratch root at `<sandbox-dir>/skill-work/`. The composition root calls `ResetSkillWork` at startup so stale `work_id`s from a previous session can't resolve.
+
+### internal/adapters/skills/fs/
+
+`fs.Store` is the filesystem-backed Skills adapter; satisfies the agent's `Skills` port plus extra methods used by the tools layer (`Get`, `Read`, `Resources`).
+
+- Discovery walks `<root>/<name>/SKILL.md` at depth 2; non-skill subdirectories (no SKILL.md) and dotfile dirs (`.git`, etc.) are ignored.
+- Frontmatter parser uses `gopkg.in/yaml.v3` with a one-shot lenient retry that quotes unquoted-colon values (the spec's most common authoring mistake). Strict parse fails with no retry success surface as warnings; the skill is dropped.
+- Lenient validation: name mismatch with directory → use directory name (with diagnostic); over-length name/description/compatibility → diagnostic, still loaded; missing description → hard skip.
+- `Resources(name)` enumerates files under conventional `scripts/`, `references/`, `assets/` subdirs (excluding dotfiles), capped at `MaxResourceListing` (50) entries. Used by `skill_activate` to surface bundled resources without eagerly reading them.
+- `Read(name, relPath)` reads a single resource file; the relative path is rejected if it's absolute or if `filepath.Rel` resolves outside the skill directory.
+- `Reload()` is best-effort: per-skill parse errors log and drop the offending skill but never fail the whole catalog. The agent calls `Reload` on every context rebuild so operator-dropped skills become visible without a restart.
 
 ### internal/adapters/email/imap/
 

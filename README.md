@@ -168,6 +168,12 @@ An optional Docker-based execution environment. The default image (`ghcr.io/matj
 
 When `[email]` is configured, the agent gets an `email_fetch` tool that opens a short-lived IMAP connection per call. Useful for letting the agent pick up things its operator emails to a dedicated inbox.
 
+### Agent Skills (optional)
+
+Faultline supports the [Agent Skills](https://agentskills.io) open standard. When `[skills]` is enabled, Faultline scans `<dir>/<skill-name>/SKILL.md` files at startup and on every context rebuild, injects each skill's name + description into the system prompt's "Available Skills" section, and advertises four `skill_*` tools (activate, read, execute, work_read). Skills are operator-supplied folders that bundle specialized instructions plus optional `scripts/`, `references/`, and `assets/` subdirectories. Each `skill_execute` call runs in an isolated Docker container with **only** the named skill's directory mounted at `/skill` (read-only) plus a fresh per-call `/work` scratch directory — skills cannot see the agent's memory, the regular sandbox, or any other skill's data. The sandbox feature must be enabled separately for `skill_execute` to function.
+
+When `[skills] install_enabled = true` (off by default), the agent can also install new skills autonomously via `skill_install`, which fetches a tarball URL or git repository into the skills directory after validating that it contains a parseable `SKILL.md`. The catalog reloads on every context rebuild plus immediately after a successful install, so a freshly-installed skill is visible without a restart.
+
 ## Tools
 
 | Category | Tools |
@@ -177,6 +183,8 @@ When `[email]` is configured, the agent gets an `email_fetch` tool that opens a 
 | **System** | `context_status`, `get_time`, `sleep`, `send_message`, `get_version`, `rebuild_indexes` |
 | **Self-update** (when enabled) | `update_check`, `update_apply` |
 | **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |
+| **Skills** (when enabled, ≥1 skill) | `skill_activate`, `skill_read`, `skill_execute`, `skill_work_read` |
+| **Skills install** (when `install_enabled`) | `skill_install` |
 | **Email** (when configured) | `email_fetch` |
 
 ## Architecture

@@ -24,6 +24,12 @@ type Config struct {
 	// alongside BM25 in memory_search and memory mutations re-embed
 	// the affected file synchronously.
 	Embeddings EmbeddingsConfig `toml:"embeddings"`
+
+	// Skills is optional; when Enabled, the agent scans the configured
+	// directory for Agent Skills (https://agentskills.io) at startup
+	// and on every context rebuild, injects a tier-1 catalog into the
+	// system prompt, and advertises skill_* tools.
+	Skills SkillsConfig `toml:"skills"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -227,6 +233,43 @@ func (e EmbeddingsConfig) Active() bool {
 	return e.Enabled && e.URL != "" && e.Model != ""
 }
 
+// SkillsConfig holds Agent Skills settings. When Enabled, Faultline
+// scans the Dir directory for skill folders (each containing a
+// SKILL.md), injects their name + description into the system prompt
+// at startup and on context rebuild, and advertises skill_activate,
+// skill_read, skill_execute, and skill_work_read tools to the LLM.
+//
+// Skills are operator-supplied and implicitly trusted: anything the
+// operator drops into Dir is fair game for the agent to load and
+// execute. Skill execution always runs through the Docker sandbox
+// with a per-call /work scratch directory; the sandbox feature must
+// be enabled separately for skill_execute to function.
+type SkillsConfig struct {
+	// Enabled toggles skill discovery and the skill_* tools.
+	Enabled bool `toml:"enabled"`
+
+	// Dir is the root directory under which each skill lives in its
+	// own subfolder, e.g. <Dir>/<skill-name>/SKILL.md. Defaults to
+	// "./skills". Created lazily by the operator; a missing directory
+	// is not an error -- the catalog stays empty until skills appear.
+	Dir string `toml:"dir"`
+
+	// InstallEnabled gates the skill_install tool. When false (the
+	// default), the agent cannot install skills autonomously and the
+	// tool is not advertised at all. When true, the agent can fetch
+	// skills from tarball URLs or git repositories into Dir; this
+	// gives the agent significant filesystem and network capability,
+	// so opt in deliberately.
+	InstallEnabled bool `toml:"install_enabled"`
+}
+
+// Active reports whether skills support is wired up. Mirrors the
+// pattern used by EmbeddingsConfig.Active so callers don't have to
+// check both Enabled and the minimum required fields.
+func (s SkillsConfig) Active() bool {
+	return s.Enabled && s.Dir != ""
+}
+
 // EmailConfig holds optional IMAP email connection settings.
 type EmailConfig struct {
 	Host     string `toml:"host"`
@@ -311,6 +354,10 @@ func Default() *Config {
 			Model:     "text-embedding-3-small",
 			Timeout:   duration(30 * time.Second),
 			BatchSize: 100,
+		},
+		Skills: SkillsConfig{
+			Enabled: false,
+			Dir:     "./skills",
 		},
 	}
 }

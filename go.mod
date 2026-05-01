@@ -7,7 +7,9 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Mad-Pixels/goldmark-tgmd v0.0.10
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
+	golang.org/x/mod v0.35.0
 	golang.org/x/net v0.53.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -35,7 +37,6 @@ require (
 	github.com/sqs/go-xoauth2 v0.0.0-20120917012134-0911dad68e56 // indirect
 	github.com/ssor/bom v0.0.0-20170718123548-6386211fdfcf // indirect
 	github.com/yuin/goldmark v1.6.0 // indirect
-	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 )
