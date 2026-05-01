@@ -20,7 +20,8 @@ jobs:
     name: release-please
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: release
+        uses: googleapis/release-please-action@v4
         with:
           # Push tags using a Personal Access Token rather than the
           # default GITHUB_TOKEN. GitHub deliberately suppresses
@@ -34,3 +35,29 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # When release-please cuts a release (i.e. the release PR was just
+      # merged), augment the GitHub Release body with GitHub's auto-
+      # generated "What's Changed" section. release-please's own body is
+      # built from conventional-commit subjects only; auto-notes pull in
+      # PR titles, authors, and links so the release page actually tells
+      # readers what landed. CHANGELOG.md in the repo is left untouched.
+      - name: Enrich release body with auto-generated PR list
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          generated=$(gh api \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            --jq .body)
+          existing=$(gh release view "$TAG" --json body --jq .body)
+          {
+            printf '%s\n\n---\n\n' "$existing"
+            printf '%s\n' "$generated"
+          } > release-body.md
+          gh release edit "$TAG" --notes-file release-body.md
