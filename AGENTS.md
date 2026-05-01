@@ -25,14 +25,18 @@ faultline/
       templates/              the embedded *.md defaults
     tools/                    tool registry & dispatcher
       executor.go             Executor + all tool handlers
+      vector.go               Embedder interface + per-mutation reindex helpers
       wiki.go                 wiki_fetch tool
       html_test.go            HTML-to-markdown converter tests
     search/bm25/              pure-Go BM25 search index
+    search/vector/            pure-Go in-memory vector index + binary
+                              serialization (FVEC v1) for semantic search
     llm/                      shared LLM types (Message, Tool, ChatRequest, ...)
                               + heuristic token estimator
     adapters/
       llm/openai/             OpenAI-compatible HTTP client + ChatLogger
       llm/kobold/             KoboldCpp extras (tokencount, abort, perf)
+      embeddings/openai/      OpenAI-compatible /v1/embeddings client
       memory/fs/              filesystem-backed Memory adapter
       operator/telegram/      Telegram bot for collaborator messaging
       sandbox/docker/         Docker-based Python sandbox
@@ -79,14 +83,19 @@ cmd/faultline/main.go
         +-> Tool dispatch (delegated to tools.Executor):
         |     +-> web_fetch        (HTTP + HTML-to-markdown + TTL cache)
         |     +-> wiki_fetch       (MediaWiki API + cache)
-        |     +-> memory_*         (fs.Store)
-        |     +-> memory_search    (bm25.Index)
+        |     +-> memory_*         (fs.Store; mutations also re-embed
+        |                            into vector.Index when enabled)
+        |     +-> memory_search    (bm25.Index, plus vector.Index when
+        |                            embeddings configured: dual sections)
         |     +-> send_message     (operator port: telegram.Bot)
         |     +-> sandbox_*        (docker.Sandbox)
         |     +-> email_fetch      (short-lived imap.Client per call)
         |     +-> context_status   (token usage + kobold.Client.Perf if detected)
         |     +-> get_time         (current timestamp)
         |     +-> sleep            (suspend N seconds, interrupted by operator messages)
+        |     +-> rebuild_indexes  (force full rebuild of bm25 and/or vector index;
+        |                            shared helper in tools/vector.go also drives
+        |                            startup reconcile from main.go)
         |
         +-> Graceful shutdown (on first SIGINT)
               +-> Inject shutdown prompt
@@ -149,6 +158,7 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
 `tools.Executor` and all tool handlers. The largest package by line count.
 
 - **`executor.go`**: `Executor` struct, `New()` constructor, `ToolDefs()` (tool registry advertised to the LLM), `Execute()` central dispatch, web fetching with custom HTML-to-markdown converter (~400 lines), `webCache` with TTL eviction, all `memory_*` / `sandbox_*` / utility (`get_time`, `sleep`, `send_message`, `context_status`) handlers.
+- **`vector.go`**: `Embedder` interface (consumer-side; defined here rather than in `agent/ports.go` because the agent loop never embeds), per-mutation reindex helpers (`reindexVector`, `removeVector`, `removeVectorPrefix`, `renameVector`, `reindexVectorDir`), path-exclusion logic (skip `prompts/` and `.trash/`), `truncateForEmbedding` cap, dual-mode `memory_search` description selector. The mutation hooks called from `executor.go` are no-ops when the feature is disabled, so the dispatcher code is identical regardless of operator config.
 - **`wiki.go`**: `wiki_fetch` tool (MediaWiki API + plain-text extraction + cache).
 - **`html_test.go`**: HTML-to-markdown conversion tests.
 
@@ -156,9 +166,35 @@ The Executor depends on adapter packages directly (memory/fs, sandbox/docker, op
 
 ### internal/search/bm25/
 
-Pure-Go BM25 search index. `bm25.Index` (with `Build`, `Update`, `Remove`, `RemovePrefix`, `Search`) and `bm25.Result` (path/content/score). Standard k1=1.5, b=0.75. In-memory only -- rebuilt from disk on startup and after each context compaction.
+Pure-Go BM25 search index. `bm25.Index` (with `Build`, `Update`, `Remove`, `RemovePrefix`, `Search`) and `bm25.Result` (path/content/score). Standard k1=1.5, b=0.75. In-memory only.
+
+Lifecycle:
+- **Built from disk on startup** in `agent.initializeContext` via `Build(memory.AllFiles())`.
+- **Rebuilt after every context compaction** in `agent.rebuildContext` (same `Build` call) — guards against drift accumulating across long-running sessions.
+- **Updated incrementally on every memory mutation** (`memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`) by the tool dispatcher. The index is always in sync with on-disk memory between rebuilds.
+- **Force-rebuildable on demand** via the `rebuild_indexes` tool, which the LLM is told to use only when the operator asks or when it observes inconsistency between search results and known disk state.
 
 `bm25.Result` is also reused by the memory adapter for non-scored returns (RecentFiles, AllFiles); Score is left at zero in those cases. This is a small shared type, not a violation of the dependency direction (memory imports bm25, never the reverse).
+
+### internal/search/vector/
+
+Pure-Go in-memory vector index keyed by string paths. `vector.Index` provides `Upsert`, `Remove`, `RemovePrefix`, `Rename`, `Search`, plus `Save`/`Load` against a custom binary format ("FVEC v1") so embeddings persist across restarts.
+
+- Brute-force cosine similarity over a `map[string][]float32`. At Faultline's scale (low-thousands of files, 1536-dim vectors) flat scan is sub-millisecond; HNSW/IVF was ruled out as overkill.
+- Vectors are L2-normalised on Upsert so Search can use plain dot products.
+- Binary format: `magic[4]="FVEC" | version[4] | dim[4] | count[4] | model_len[2] | model[N] | records[count]{path_len[2], path[N], vec[dim*4]}`. Deterministic ordering (paths sorted on save) for byte-stable diffs in tests.
+- `ErrModelMismatch` returned by `Load` when the on-disk dim or model differs from what the in-memory index was constructed for; caller is expected to `Reset` and re-embed.
+- `ErrCorrupt` returned for unreadable / wrong-magic / inconsistent files; caller is expected to rename the file aside (mirroring the `state/jsonfile` pattern) and continue with an empty index.
+- `Dirty()` is an atomic the persistence loop polls; cleared by `Save`.
+
+### internal/adapters/embeddings/openai/
+
+`openai.Client` is a hand-rolled HTTP client for `/v1/embeddings`. Deliberately separate from `internal/adapters/llm/openai/` even though both target OpenAI-compatible servers — different endpoint, different request/response shape, different failure modes.
+
+- `New(url, apiKey, model, timeout, logger)` constructs the client; `Probe(ctx)` sends a single-input embed call to discover the model's dim. `Dim()` returns 0 until probe succeeds.
+- `Embed(ctx, []string)` returns one vector per input in input order. Defensive `sort.Slice` on `index` field of the response so order is preserved even with non-OpenAI servers that return out of order.
+- Per-call timeout is applied via a child context derived from the caller's `ctx`, not from `http.Client.Timeout`, so callers can use a long ambient context for batch operations and still bound individual calls.
+- Probe failure is **not** fatal at startup; main.go logs the error loudly and continues with semantic search disabled. The agent runs fine without it.
 
 ### internal/llm/
 

@@ -19,6 +19,11 @@ type Config struct {
 	Email    EmailConfig    `toml:"email"`
 	Limits   LimitsConfig   `toml:"limits"`
 	Update   UpdateConfig   `toml:"update"`
+
+	// Embeddings is optional; when Enabled, semantic search is added
+	// alongside BM25 in memory_search and memory mutations re-embed
+	// the affected file synchronously.
+	Embeddings EmbeddingsConfig `toml:"embeddings"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -172,6 +177,56 @@ type UpdateConfig struct {
 	BinaryPath string `toml:"binary_path"`
 }
 
+// EmbeddingsConfig holds optional semantic-search settings. When
+// Enabled, the agent constructs an OpenAI-compatible embeddings
+// client, builds an in-memory vector index of memory files (persisted
+// to disk in a custom binary format), and surfaces a "Semantic
+// results" section in memory_search alongside the existing BM25
+// "Lexical results" section.
+//
+// The LLM does not see the embeddings directly; it only sees ranked
+// path/score lists. The mechanism is best-effort enrichment — embed
+// failures are logged but never block memory writes.
+type EmbeddingsConfig struct {
+	// Enabled toggles the entire feature. When false, no embeddings
+	// client is constructed, no vector index is loaded, and
+	// memory_search is BM25-only.
+	Enabled bool `toml:"enabled"`
+
+	// URL is the OpenAI-compatible API base URL ending in /v1 (no
+	// trailing slash). The adapter appends "/embeddings". Defaults to
+	// the public OpenAI endpoint.
+	URL string `toml:"url"`
+
+	// APIKey is sent as a Bearer token. Required for OpenAI; may be
+	// empty for local servers (Ollama, LM Studio, vLLM) that don't
+	// authenticate.
+	APIKey string `toml:"api_key"`
+
+	// Model is the embedding model identifier (e.g.
+	// "text-embedding-3-small", "nomic-embed-text"). The vector
+	// index records this on disk; if it changes, the index is
+	// discarded and rebuilt on next startup.
+	Model string `toml:"model"`
+
+	// Timeout is applied per HTTP request. Zero falls back to 30s.
+	Timeout duration `toml:"timeout"`
+
+	// BatchSize is the maximum number of texts per /v1/embeddings
+	// call during the startup reconcile pass and bulk re-indexing.
+	// Per-mutation embeds always send a single text. Zero falls back
+	// to 100.
+	BatchSize int `toml:"batch_size"`
+}
+
+// Enabled is a struct-receiver alias so callers can write
+// `cfg.Embeddings.Active()` without checking both Enabled and the
+// minimum required fields. Returns true only when the feature is
+// turned on AND has the bare minimum to function.
+func (e EmbeddingsConfig) Active() bool {
+	return e.Enabled && e.URL != "" && e.Model != ""
+}
+
 // EmailConfig holds optional IMAP email connection settings.
 type EmailConfig struct {
 	Host     string `toml:"host"`
@@ -243,6 +298,13 @@ func Default() *Config {
 			GitHubRepo:    "matjam/faultline",
 			RestartMode:   "exit",
 		},
+		Embeddings: EmbeddingsConfig{
+			Enabled:   false,
+			URL:       "https://api.openai.com/v1",
+			Model:     "text-embedding-3-small",
+			Timeout:   duration(30 * time.Second),
+			BatchSize: 100,
+		},
 	}
 }
 
@@ -271,6 +333,15 @@ func Load(path string) (*Config, error) {
 	// set update.enabled = false.
 	if cfg.Update.CheckInterval.Duration() <= 0 {
 		cfg.Update.CheckInterval = duration(1 * time.Hour)
+	}
+
+	// Embeddings: backfill defaults when the operator enables the
+	// feature but leaves these fields zero.
+	if cfg.Embeddings.Timeout.Duration() <= 0 {
+		cfg.Embeddings.Timeout = duration(30 * time.Second)
+	}
+	if cfg.Embeddings.BatchSize <= 0 {
+		cfg.Embeddings.BatchSize = 100
 	}
 
 	return cfg, nil
