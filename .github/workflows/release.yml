@@ -1,13 +1,35 @@
 name: Release
 
-# Triggered by tag pushes (vX.Y.Z), which release-please creates when
-# its release PR is merged. Builds binaries and attaches them to the
-# GitHub release that release-please already created.
+# Builds binaries for a tag and attaches them to the matching GitHub
+# release. Two ways this gets triggered:
+#
+#   1. Automatically on tag push (vX.Y.Z) -- the desired path.
+#
+#      CAVEAT: tag pushes performed by release-please-action using the
+#      default GITHUB_TOKEN do NOT trigger this workflow. GitHub
+#      deliberately suppresses workflow-from-workflow chains when the
+#      pushing identity is GITHUB_TOKEN, to prevent infinite loops. To
+#      get fully automatic releases, configure release-please.yml to
+#      use a PAT instead of GITHUB_TOKEN; PAT-pushed tags do trigger
+#      downstream workflows.
+#
+#   2. Manually via workflow_dispatch (the workaround). Pick the tag
+#      from the dropdown when running the workflow. Useful when (1)
+#      didn't fire because release-please pushed the tag.
+#
+# Once we adopt a PAT in release-please.yml, the manual path becomes
+# vestigial, but harmless to keep around.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0). Must already exist."
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,6 +42,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # On workflow_dispatch we check out the tag the operator
+          # supplied; on tag-push the default ref already points at
+          # the tag.
+          ref: ${{ inputs.tag || github.ref }}
           # goreleaser needs the full history to compute changelog
           # diffs and previous-tag info, even though release-please
           # owns the actual changelog body.
