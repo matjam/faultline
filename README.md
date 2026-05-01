@@ -174,6 +174,10 @@ Faultline supports the [Agent Skills](https://agentskills.io) open standard. Whe
 
 When `[skills] install_enabled = true` (off by default), the agent can also install new skills autonomously via `skill_install`, which fetches a tarball URL or git repository into the skills directory after validating that it contains a parseable `SKILL.md`. The catalog reloads on every context rebuild plus immediately after a successful install, so a freshly-installed skill is visible without a restart.
 
+### Subagents (optional)
+
+When `[subagent]` is enabled, the primary agent gains five tools (`subagent_run`, `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_cancel`) and can delegate work to a child agent loop running under a configured profile. Profiles select an LLM endpoint, model, and sampler overrides; a synthesized `default` profile (matching `[api]`) is always available. The primary supplies all relevant context as the child's prompt; the child runs a fresh agent loop with the same tool surface (minus `sleep`, `update_*`, and nested `subagent_*`) and terminates by calling `subagent_report`, whose payload is returned to the primary. Synchronous runs (`subagent_run`) block the primary until the child reports; async runs (`subagent_spawn`) let the primary keep working while the report arrives in its inbox like an operator message. `subagent_wait(work_id)` is the bridge — block until a previously-spawned child reports, drain the report inline. Children share the primary's memory, search indexes, sandbox, and skills; they cannot see its conversation log and cannot themselves spawn further subagents.
+
 ## Tools
 
 | Category | Tools |
@@ -185,6 +189,7 @@ When `[skills] install_enabled = true` (off by default), the agent can also inst
 | **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |
 | **Skills** (when enabled, ≥1 skill) | `skill_activate`, `skill_read`, `skill_execute`, `skill_work_read` |
 | **Skills install** (when `install_enabled`) | `skill_install` |
+| **Subagents** (when enabled) | `subagent_run`, `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_cancel` |
 | **Email** (when configured) | `email_fetch` |
 
 ## Architecture

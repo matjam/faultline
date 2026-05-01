@@ -108,4 +108,10 @@ type Subagents interface {
 	Pending() []subagent.Report
 	HasPending() bool
 	CancelAll()
+
+	// Profiles returns the configured profiles for system-prompt
+	// catalog injection. Static for the agent's lifetime; called on
+	// every context rebuild for consistency with how skills are
+	// surfaced.
+	Profiles() []subagent.Profile
 }

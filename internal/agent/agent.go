@@ -123,6 +123,22 @@ func (a *Agent) gatherSkillCatalog() []skillsdomain.Skill {
 	return a.skills.List()
 }
 
+// gatherSubagentCatalog returns the configured subagent profiles
+// projected to {Name, Purpose} for system-prompt injection. Returns
+// nil when subagent support is disabled (or when this Agent is itself
+// a subagent, which doesn't have access to nested delegation).
+func (a *Agent) gatherSubagentCatalog() []subagent.Catalog {
+	if a.subagents == nil {
+		return nil
+	}
+	profiles := a.subagents.Profiles()
+	out := make([]subagent.Catalog, 0, len(profiles))
+	for _, p := range profiles {
+		out = append(out, p.ToCatalog())
+	}
+	return out
+}
+
 // Close releases the resources owned by the agent. Adapters whose
 // lifecycles outlive the agent (the Sandbox, ChatLogger, etc.) are
 // closed by the composition root, not here.
@@ -567,12 +583,13 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 	// scaffolding.
 	memories := a.gatherContextMemories()
 	skillCatalog := a.gatherSkillCatalog()
+	subagentCatalog := a.gatherSubagentCatalog()
 	now := time.Now()
 	basePrompt := prompts["system"]
 	if a.systemPromptOverride != "" {
 		basePrompt = a.systemPromptOverride
 	}
-	fullSystemPrompt := prompt.BuildCycleContext(basePrompt, memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(basePrompt, memories, skillCatalog, subagentCatalog, now, a.cfg.Limits.RecentMemoryChars)
 	systemMsg := llm.Message{
 		Role:    llm.RoleSystem,
 		Content: fullSystemPrompt,
@@ -707,8 +724,9 @@ func (a *Agent) rebuildContext(summary string) ([]llm.Message, map[string]string
 	// the operator has dropped in since the last cycle become visible.
 	memories := a.gatherContextMemories()
 	skillCatalog := a.gatherSkillCatalog()
+	subagentCatalog := a.gatherSubagentCatalog()
 	now := time.Now()
-	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, skillCatalog, subagentCatalog, now, a.cfg.Limits.RecentMemoryChars)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: fullSystemPrompt},

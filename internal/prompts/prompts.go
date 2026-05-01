@@ -15,6 +15,7 @@ import (
 
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/skills"
+	"github.com/matjam/faultline/internal/subagent"
 )
 
 // Embedded default prompt contents, compiled into the binary from templates/.
@@ -178,7 +179,7 @@ func Render(template string, now time.Time) string {
 // Skills" section with a brief instruction telling the agent to call
 // skill_activate when a task matches a skill's description. Each
 // entry costs ~50-100 tokens, matching the spec's tier-1 disclosure.
-func BuildCycleContext(systemPrompt string, memories []bm25.Result, skillCatalog []skills.Skill, now time.Time, memoryCharLimit int) string {
+func BuildCycleContext(systemPrompt string, memories []bm25.Result, skillCatalog []skills.Skill, subagentCatalog []subagent.Catalog, now time.Time, memoryCharLimit int) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
@@ -187,6 +188,10 @@ func BuildCycleContext(systemPrompt string, memories []bm25.Result, skillCatalog
 
 	if len(skillCatalog) > 0 {
 		writeSkillCatalog(&sb, skillCatalog)
+	}
+
+	if len(subagentCatalog) > 0 {
+		writeSubagentCatalog(&sb, subagentCatalog)
 	}
 
 	if len(memories) > 0 {
@@ -209,6 +214,29 @@ func BuildCycleContext(systemPrompt string, memories []bm25.Result, skillCatalog
 	}
 
 	return sb.String()
+}
+
+// writeSubagentCatalog renders the subagent profile disclosure
+// section: a brief explanation of the delegation tools followed by a
+// bulleted name/purpose list. The model uses this to pick a profile
+// when calling subagent_run / subagent_spawn.
+func writeSubagentCatalog(sb *strings.Builder, catalog []subagent.Catalog) {
+	sb.WriteString("## Available Subagent Profiles\n\n")
+	sb.WriteString("You can delegate isolated work to a subagent via `subagent_run` ")
+	sb.WriteString("(synchronous; returns the report inline) or `subagent_spawn` ")
+	sb.WriteString("(asynchronous; the report arrives in your context like an operator message). ")
+	sb.WriteString("Use `subagent_wait` to block on a previously-spawned subagent, ")
+	sb.WriteString("`subagent_status` to list active spawns, and `subagent_cancel` to abort one. ")
+	sb.WriteString("The subagent has the same tools you do (minus sleep, update_*, and nested subagent_*) ")
+	sb.WriteString("but cannot see your conversation -- you must put everything it needs in the `prompt`.\n\n")
+	for _, p := range catalog {
+		purpose := strings.TrimSpace(p.Purpose)
+		if purpose == "" {
+			purpose = "(no purpose configured)"
+		}
+		fmt.Fprintf(sb, "- **%s**: %s\n", p.Name, purpose)
+	}
+	sb.WriteString("\n")
 }
 
 // writeSkillCatalog renders the tier-1 skill disclosure section:
