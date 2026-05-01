@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
@@ -19,20 +20,30 @@ import (
 	prompt "github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
 	skillsdomain "github.com/matjam/faultline/internal/skills"
+	"github.com/matjam/faultline/internal/subagent"
 )
 
 // Agent is the autonomous agent that runs in a continuous loop.
 type Agent struct {
-	cfg       *config.Config
-	chat      ChatModel
-	memory    Memory
-	search    Searcher
-	operator  Operator  // nil when no collaborator channel is configured
-	tokenizer Tokenizer // nil when no real tokenizer is detected
-	tools     Tools
-	state     StateStore
-	skills    Skills // nil when skills support is disabled
-	logger    *slog.Logger
+	cfg                  *config.Config
+	chat                 ChatModel
+	memory               Memory
+	search               Searcher
+	operator             Operator  // nil when no collaborator channel is configured
+	tokenizer            Tokenizer // nil when no real tokenizer is detected
+	tools                Tools
+	state                StateStore
+	skills               Skills    // nil when skills support is disabled
+	subagents            Subagents // nil for primaries with [subagent] off and for all children
+	logger               *slog.Logger
+	maxTurns             int    // 0 means unlimited; >0 caps Run loop iterations (subagent use)
+	systemPromptOverride string // when non-empty, replaces prompts["system"] (subagent use)
+
+	// stopRequested is set by RequestStop; the Run loop checks it at
+	// the top of each iteration and exits cleanly when set. Used by
+	// subagent_report to terminate the child loop after the report
+	// has been delivered.
+	stopRequested atomic.Bool
 }
 
 // Deps bundles the agent's port dependencies. Constructing the Agent
@@ -46,25 +57,54 @@ type Deps struct {
 	Tokenizer Tokenizer // optional
 	Tools     Tools
 	State     StateStore
-	Skills    Skills // optional
+	Skills    Skills    // optional
+	Subagents Subagents // optional; primary only
+
+	// MaxTurns caps the Run loop's iteration count. Zero means
+	// unlimited (the normal primary case). Used by subagents to
+	// bound runaway children -- when the cap is hit before the
+	// child calls subagent_report, Run exits cleanly and the
+	// spawnFn closure marks the result truncated.
+	MaxTurns int
+
+	// SystemPromptOverride, when non-empty, replaces prompts["system"]
+	// in initializeContext. The other prompts (cycle-start, continue,
+	// compaction, shutdown) are still loaded from the memory store
+	// because subagents need the same loop scaffolding.
+	SystemPromptOverride string
 }
 
 // New constructs an Agent. Any nil-allowed dependency (Operator,
-// Tokenizer, Skills) may be left as a nil interface; the agent handles
-// those cases internally with heuristic fallbacks or empty catalogs.
+// Tokenizer, Skills, Subagents) may be left as a nil interface; the
+// agent handles those cases internally with heuristic fallbacks or
+// empty catalogs.
 func New(cfg *config.Config, deps Deps, logger *slog.Logger) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		chat:      deps.Chat,
-		memory:    deps.Memory,
-		search:    deps.Search,
-		operator:  deps.Operator,
-		tokenizer: deps.Tokenizer,
-		tools:     deps.Tools,
-		state:     deps.State,
-		skills:    deps.Skills,
-		logger:    logger,
+		cfg:                  cfg,
+		chat:                 deps.Chat,
+		memory:               deps.Memory,
+		search:               deps.Search,
+		operator:             deps.Operator,
+		tokenizer:            deps.Tokenizer,
+		tools:                deps.Tools,
+		state:                deps.State,
+		skills:               deps.Skills,
+		subagents:            deps.Subagents,
+		logger:               logger,
+		maxTurns:             deps.MaxTurns,
+		systemPromptOverride: deps.SystemPromptOverride,
 	}
+}
+
+// RequestStop signals the Run loop to exit cleanly after the current
+// iteration. Used by the tools layer when the child agent's
+// subagent_report tool fires: the report has been delivered to the
+// parent, so the child's loop should not continue.
+//
+// Idempotent and concurrency-safe; calling it multiple times has the
+// same effect as calling it once.
+func (a *Agent) RequestStop() {
+	a.stopRequested.Store(true)
 }
 
 // gatherSkillCatalog returns the current skill catalog for system-prompt
@@ -257,7 +297,29 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 	lastSavedLen := -1
 	lastSavedIdle := -1
 
+	// Subagent loop bound. turn counts iterations (one Chat call per
+	// iteration); we exit when MaxTurns is set and the cap is hit.
+	// Zero MaxTurns (the primary case) disables the check.
+	turn := 0
+
 	for {
+		// Subagents: caller signaled the loop should stop after
+		// delivering the report. Check before any other work so we
+		// don't spend a turn on a doomed iteration.
+		if a.stopRequested.Load() {
+			a.logger.Info("agent: stop requested, exiting Run loop", "turns", turn)
+			return nil
+		}
+
+		// Subagents: enforce the per-run turn cap. The spawnFn closure
+		// in cmd/faultline/main.go inspects whether the report was
+		// delivered to decide whether to mark the result truncated.
+		if a.maxTurns > 0 && turn >= a.maxTurns {
+			a.logger.Warn("agent: max turns reached, exiting Run loop",
+				"turns", turn, "max", a.maxTurns)
+			return nil
+		}
+
 		// Check for shutdown
 		select {
 		case <-ctx.Done():
@@ -375,29 +437,43 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		// a sudden spike means the KV cache was invalidated.
 		a.logBackendPerf()
 
-		// Drain any collaborator messages that arrived while the LLM was
-		// generating. We will handle them at the next available
-		// opportunity rather than mid-generation.
-		var pending []string
+		// Drain any messages that arrived while the LLM was generating
+		// -- both operator (collaborator) messages and subagent reports.
+		// We will handle them at the next available opportunity rather
+		// than mid-generation.
+		var pendingOp []string
 		if a.operator != nil {
-			pending = a.operator.Pending()
+			pendingOp = a.operator.Pending()
 		}
+		var pendingSub []subagent.Report
+		if a.subagents != nil {
+			pendingSub = a.subagents.Pending()
+		}
+		hasPending := len(pendingOp)+len(pendingSub) > 0
 
 		switch {
-		case len(msg.ToolCalls) > 0 && len(pending) > 0:
-			// A collaborator message arrived while the model wanted to use
-			// tools. Defer the tool calls: every tool_call_id must still
-			// have a matching tool response or the next API call will fail,
-			// so we emit a "deferred" stub for each, then surface the
-			// collaborator message. The agent can reply and decide whether
-			// the deferred actions are still appropriate.
-			a.logger.Info("collaborator message arrived during generation; deferring tool calls",
-				"tool_calls", len(msg.ToolCalls), "pending", len(pending))
-			const deferredBody = "[Deferred] A message from your collaborator arrived before this tool call could run. Read their message below and reply with send_message first. After replying, re-issue this tool call if it still makes sense, or move on if their message changes your plan."
+		case len(msg.ToolCalls) > 0 && hasPending:
+			// New input arrived while the model wanted to use tools.
+			// Defer the tool calls: every tool_call_id must still
+			// have a matching tool response or the next API call will
+			// fail, so we emit a "deferred" stub for each, then
+			// surface the new input. The agent can read it and decide
+			// whether the deferred actions are still appropriate.
+			a.logger.Info("incoming messages arrived during generation; deferring tool calls",
+				"tool_calls", len(msg.ToolCalls),
+				"operator_pending", len(pendingOp),
+				"subagent_pending", len(pendingSub),
+			)
+			const deferredBody = "[Deferred] An incoming message (collaborator turn or subagent report) arrived before this tool call could run. Read it below and respond first. After responding, re-issue this tool call if it still makes sense, or move on if the new input changes your plan."
 			for _, tc := range msg.ToolCalls {
 				messages = append(messages, toolMessage(tc.ID, deferredBody))
 			}
-			messages = a.appendCollaboratorMessages(messages, pending)
+			if len(pendingOp) > 0 {
+				messages = a.appendCollaboratorMessages(messages, pendingOp)
+			}
+			if len(pendingSub) > 0 {
+				messages = a.appendSubagentReports(messages, pendingSub)
+			}
 			// Tool calls + new input both count as the model engaging.
 			idleStreak = 0
 
@@ -413,12 +489,16 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			}
 			idleStreak = 0
 
-		case len(pending) > 0:
-			// Text-only response with collaborator messages waiting: surface
-			// them in place of the continue prompt so the next turn
-			// addresses the collaborator naturally. New collaborator input
-			// resets the idle counter.
-			messages = a.appendCollaboratorMessages(messages, pending)
+		case hasPending:
+			// Text-only response with new input waiting: surface it in
+			// place of the continue prompt so the next turn addresses
+			// the new input naturally. Resets the idle counter.
+			if len(pendingOp) > 0 {
+				messages = a.appendCollaboratorMessages(messages, pendingOp)
+			}
+			if len(pendingSub) > 0 {
+				messages = a.appendSubagentReports(messages, pendingSub)
+			}
 			idleStreak = 0
 
 		default:
@@ -446,6 +526,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		a.logger.Debug("turn complete",
 			"messages", len(messages),
 			"tokens_est", a.countMessageTokens(messages))
+		turn++
 	}
 }
 
@@ -477,10 +558,21 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 	// Build a fresh system message from current prompts + recent memories
 	// + current skill catalog. This is used both for fresh starts and
 	// for replacing the (stale) system message in a restored state file.
+	//
+	// SystemPromptOverride lets a subagent replace the loaded "system"
+	// base prompt with one supplied by the spawnFn closure (typically
+	// "you are a subagent of the primary; here is your task: ...").
+	// The other prompts (cycle-start, continue, compaction, shutdown)
+	// still come from memory because subagents reuse the same loop
+	// scaffolding.
 	memories := a.gatherContextMemories()
 	skillCatalog := a.gatherSkillCatalog()
 	now := time.Now()
-	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
+	basePrompt := prompts["system"]
+	if a.systemPromptOverride != "" {
+		basePrompt = a.systemPromptOverride
+	}
+	fullSystemPrompt := prompt.BuildCycleContext(basePrompt, memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
 	systemMsg := llm.Message{
 		Role:    llm.RoleSystem,
 		Content: fullSystemPrompt,
@@ -683,20 +775,35 @@ func (a *Agent) gatherContextMemories() []bm25.Result {
 	return results
 }
 
-// injectPendingMessages checks for queued collaborator messages and appends
-// them to the conversation. Returns the updated messages and whether any
-// were injected.
+// injectPendingMessages drains both the operator and the subagent
+// inboxes and appends any pending entries to the conversation. Returns
+// the updated messages and whether anything was injected.
+//
+// Both queues are drained on every call (rather than checking
+// HasPending first) because the read is the same primitive as the
+// drain in both adapters; there is no probe-then-take race to worry
+// about.
 func (a *Agent) injectPendingMessages(messages []llm.Message) ([]llm.Message, bool) {
-	if a.operator == nil {
+	var pendingOp []string
+	if a.operator != nil {
+		pendingOp = a.operator.Pending()
+	}
+	var pendingSub []subagent.Report
+	if a.subagents != nil {
+		pendingSub = a.subagents.Pending()
+	}
+
+	if len(pendingOp) == 0 && len(pendingSub) == 0 {
 		return messages, false
 	}
 
-	pending := a.operator.Pending()
-	if len(pending) == 0 {
-		return messages, false
+	if len(pendingOp) > 0 {
+		messages = a.appendCollaboratorMessages(messages, pendingOp)
 	}
-
-	return a.appendCollaboratorMessages(messages, pending), true
+	if len(pendingSub) > 0 {
+		messages = a.appendSubagentReports(messages, pendingSub)
+	}
+	return messages, true
 }
 
 // appendCollaboratorMessages formats each collaborator message as a user
@@ -715,6 +822,50 @@ func (a *Agent) appendCollaboratorMessages(messages []llm.Message, pending []str
 	return messages
 }
 
+// appendSubagentReports formats each completed subagent report as a
+// user turn and appends them to the conversation. Used by the same
+// drain points as appendCollaboratorMessages so both queues land in
+// the same place in the conversation.
+//
+// The wrapper format mirrors the [Collaborator message ...] header so
+// the model can pattern-match on a consistent shape; the body
+// includes Truncated/Canceled flags and any error so the parent can
+// react appropriately.
+func (a *Agent) appendSubagentReports(messages []llm.Message, reports []subagent.Report) []llm.Message {
+	for _, r := range reports {
+		a.logger.Info("injecting subagent report into conversation",
+			"work_id", r.WorkID,
+			"profile", r.Profile,
+			"truncated", r.Truncated,
+			"canceled", r.Canceled,
+			"err", r.Err,
+		)
+		var b strings.Builder
+		fmt.Fprintf(&b, "[Subagent report - %s, work_id=%s, profile=%s]\n",
+			time.Now().Format(time.RFC1123), r.WorkID, r.Profile)
+		if r.Truncated {
+			b.WriteString("[truncated -- subagent hit turn or time cap before reporting]\n")
+		}
+		if r.Canceled {
+			b.WriteString("[canceled -- subagent was canceled before reporting]\n")
+		}
+		if r.Err != nil {
+			fmt.Fprintf(&b, "[error: %s]\n", r.Err)
+		}
+		b.WriteString("\n")
+		if r.Text == "" {
+			b.WriteString("(no report content)")
+		} else {
+			b.WriteString(r.Text)
+		}
+		messages = append(messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: b.String(),
+		})
+	}
+	return messages
+}
+
 // handleShutdown wraps gracefulSave and translates errShutdown to nil.
 func (a *Agent) handleShutdown(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) error {
 	err := a.gracefulSave(ctx, messages, toolDefs, prompts)
@@ -726,8 +877,17 @@ func (a *Agent) handleShutdown(ctx context.Context, messages []llm.Message, tool
 
 // gracefulSave gives the agent a limited number of turns to save its state
 // before the process exits. Uses a 2-minute timeout.
+//
+// Active subagents are canceled at the very top: their goroutines
+// observe ctx.Done() and exit promptly, freeing the parent's
+// gracefulSave loop from competing for the 2-minute / 10-turn budget
+// with children's in-flight LLM calls. Pending reports are abandoned;
+// the parent's state file is the source of truth across restarts.
 func (a *Agent) gracefulSave(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) error {
 	a.logger.Info("graceful shutdown: asking agent to save state")
+	if a.subagents != nil {
+		a.subagents.CancelAll()
+	}
 
 	saveCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

@@ -7,6 +7,7 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/skills"
+	"github.com/matjam/faultline/internal/subagent"
 )
 
 // ChatModel is the LLM port. The agent does not care which backend
@@ -94,4 +95,17 @@ type StateStore interface {
 type Skills interface {
 	List() []skills.Skill
 	Reload() error
+}
+
+// Subagents is the inbox port for completed subagent runs. The agent
+// loop drains the inbox between turns (and after each LLM response)
+// alongside the operator queue, and on graceful shutdown it cancels
+// every active subagent so their goroutines unwind promptly.
+//
+// May be nil for the primary agent when the [subagent] feature is
+// disabled, and is always nil for child agents (no nesting).
+type Subagents interface {
+	Pending() []subagent.Report
+	HasPending() bool
+	CancelAll()
 }
