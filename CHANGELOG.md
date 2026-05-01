@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/matjam/faultline/compare/v1.0.0...v1.1.0) (2026-05-01)
+
+
+### Features
+
+* add self-update support ([cc7090e](https://github.com/matjam/faultline/commit/cc7090eb6c9b6da4601bb3a5c5be132519fcc5d6))
+* add self-update support ([1739d61](https://github.com/matjam/faultline/commit/1739d61bab2a551858a099442343315c04e4437f))
+
 ## 1.0.0 (2026-05-01)
 
 
