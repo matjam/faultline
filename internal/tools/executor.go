@@ -30,6 +30,7 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/search/vector"
+	"github.com/matjam/faultline/internal/subagent"
 	"github.com/matjam/faultline/internal/update"
 	"github.com/matjam/faultline/internal/version"
 )
@@ -115,6 +116,7 @@ var subagentForbidden = map[string]struct{}{
 	"update_apply":    {},
 	"subagent_run":    {},
 	"subagent_spawn":  {},
+	"subagent_wait":   {},
 	"subagent_status": {},
 	"subagent_cancel": {},
 }
@@ -927,6 +929,13 @@ func (te *Executor) ToolDefs() []llm.Tool {
 		tools = append(tools, defs...)
 	}
 
+	// Subagent delegation. Mode-aware: primary gets the four
+	// run/spawn/status/cancel tools; subagent gets just the report
+	// tool. Returns nil when not wired.
+	if defs := te.subagentToolDefs(); len(defs) > 0 {
+		tools = append(tools, defs...)
+	}
+
 	// Mode-based filtering: drop tools subagents are not allowed to
 	// call. Applied at the end so the rest of ToolDefs() doesn't have
 	// to be branchy on mode.
@@ -983,6 +992,13 @@ type Executor struct {
 	currentTokens       int
 	limits              config.LimitsConfig
 	maxSleep            time.Duration // upper bound for the `sleep` tool
+
+	// Subagent wiring (optional). subagentMgr is set on the primary
+	// Executor when [subagent] is enabled; subagentReportFn is set on
+	// each child Executor by main.go's spawnFn closure (it captures
+	// the report and signals the child agent to stop).
+	subagentMgr      *subagent.Manager
+	subagentReportFn func(text string)
 }
 
 // Deps bundles the dependencies an Executor needs. Each Executor
@@ -1017,6 +1033,20 @@ type Deps struct {
 	MaxTokens           int
 	Limits              config.LimitsConfig
 	MaxSleep            time.Duration
+
+	// SubagentManager is set on the primary Executor when subagent
+	// support is enabled. nil for child Executors and for primaries
+	// when the feature is off; the four subagent_run/spawn/status/
+	// cancel tools are not advertised in those cases.
+	SubagentManager *subagent.Manager
+
+	// SubagentReportFn is set on child Executors by the spawnFn
+	// closure in cmd/faultline/main.go. When non-nil, the
+	// subagent_report tool is advertised; calling it invokes this
+	// callback with the report text. The callback is responsible
+	// for stashing the text and signaling the child agent loop
+	// to stop on its next iteration.
+	SubagentReportFn func(text string)
 }
 
 // New creates a new tool executor.
@@ -1065,6 +1095,8 @@ func New(deps Deps) *Executor {
 		limits:              deps.Limits,
 		maxSleep:            deps.MaxSleep,
 		cache:               deps.WebCache,
+		subagentMgr:         deps.SubagentManager,
+		subagentReportFn:    deps.SubagentReportFn,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -1216,6 +1248,19 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 		return te.skillWorkRead(args)
 	case "skill_install":
 		return te.skillInstall(ctx, args)
+	// Subagent tools
+	case "subagent_run":
+		return te.subagentRun(ctx, args)
+	case "subagent_spawn":
+		return te.subagentSpawn(ctx, args)
+	case "subagent_wait":
+		return te.subagentWait(ctx, args)
+	case "subagent_status":
+		return te.subagentStatus()
+	case "subagent_cancel":
+		return te.subagentCancel(args)
+	case "subagent_report":
+		return te.subagentReport(args)
 	default:
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}

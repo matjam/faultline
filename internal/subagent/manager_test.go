@@ -257,16 +257,17 @@ func TestCancelUnknownWorkID(t *testing.T) {
 }
 
 func TestCancelAllStopsEveryone(t *testing.T) {
+	const N = 3
 	var wg sync.WaitGroup
+	wg.Add(N) // pre-add: wg.Add inside the goroutine races with wg.Wait
 	spawn := func(ctx context.Context, workID string, profile Profile, prompt string, maxTurns int) Report {
-		wg.Add(1)
 		defer wg.Done()
 		<-ctx.Done()
 		return Report{Canceled: true}
 	}
 
-	m := New(Config{MaxConcurrent: 4}, newTestProfiles(), spawn, newTestLogger())
-	for i := 0; i < 3; i++ {
+	m := New(Config{MaxConcurrent: N}, newTestProfiles(), spawn, newTestLogger())
+	for i := 0; i < N; i++ {
 		if _, err := m.Spawn(context.Background(), "fast", "x"); err != nil {
 			t.Fatalf("spawn %d: %v", i, err)
 		}
@@ -274,7 +275,7 @@ func TestCancelAllStopsEveryone(t *testing.T) {
 
 	// Wait until all are registered.
 	for i := 0; i < 100; i++ {
-		if m.ActiveCount() == 3 {
+		if m.ActiveCount() == N {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -305,24 +306,49 @@ func TestEmptyPromptRejected(t *testing.T) {
 }
 
 func TestInboxDropsOldestWhenFull(t *testing.T) {
-	release := make(chan int, 10)
+	// Per-spawn release channels keyed by prompt text so the test can
+	// release goroutines in a deterministic order regardless of which
+	// goroutine started first.
+	gates := map[string]chan struct{}{
+		"a": make(chan struct{}),
+		"b": make(chan struct{}),
+		"c": make(chan struct{}),
+	}
 	spawn := func(ctx context.Context, workID string, profile Profile, prompt string, maxTurns int) Report {
-		<-release
+		<-gates[prompt]
 		return Report{Text: prompt}
 	}
 
 	m := New(Config{MaxConcurrent: 10, MaxInbox: 2}, newTestProfiles(), spawn, newTestLogger())
 
-	for i := 0; i < 3; i++ {
-		if _, err := m.Spawn(context.Background(), "fast", string(rune('a'+i))); err != nil {
-			t.Fatalf("spawn %d: %v", i, err)
+	for _, name := range []string{"a", "b", "c"} {
+		if _, err := m.Spawn(context.Background(), "fast", name); err != nil {
+			t.Fatalf("spawn %s: %v", name, err)
 		}
 	}
-	// Release them in order; final inbox should hold the last 2.
-	for i := 0; i < 3; i++ {
-		release <- i
-	}
 
+	// Release one at a time, waiting for each to land in the inbox
+	// before the next. This guarantees deliver order matches release
+	// order, so 'a' is the eldest when 'c' arrives and the cap fires.
+	waitForPending := func(want int) {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			m.mu.Lock()
+			n := len(m.pending)
+			m.mu.Unlock()
+			if n >= want {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %d pending reports", want)
+	}
+	close(gates["a"])
+	waitForPending(1)
+	close(gates["b"])
+	waitForPending(2)
+	close(gates["c"])
+	// After 'c' delivers, drop-oldest should have evicted 'a'.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if m.ActiveCount() == 0 {
@@ -335,7 +361,6 @@ func TestInboxDropsOldestWhenFull(t *testing.T) {
 	if len(pending) != 2 {
 		t.Fatalf("len(pending) = %d, want 2 (inbox cap)", len(pending))
 	}
-	// First report (text "a") should be the dropped one; "b" and "c" survive.
 	for _, r := range pending {
 		if r.Text == "a" {
 			t.Errorf("oldest report 'a' was not dropped; got %+v", r)
@@ -363,6 +388,79 @@ func TestFindProfile(t *testing.T) {
 	}
 	if _, ok := m.FindProfile("no-such"); ok {
 		t.Error("FindProfile(no-such) ok=true; want false")
+	}
+}
+
+func TestWaitReturnsAlreadyPending(t *testing.T) {
+	release := make(chan struct{})
+	spawn := func(ctx context.Context, workID string, p Profile, prompt string, maxTurns int) Report {
+		<-release
+		return Report{Text: "done"}
+	}
+	m := New(Config{}, newTestProfiles(), spawn, newTestLogger())
+	workID, err := m.Spawn(context.Background(), "fast", "x")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	close(release)
+	// Drain into inbox.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if m.HasPending() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rep, found, err := m.Wait(context.Background(), workID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !found {
+		t.Fatal("Wait found=false")
+	}
+	if rep.Text != "done" {
+		t.Errorf("rep.Text = %q, want done", rep.Text)
+	}
+	if m.HasPending() {
+		t.Error("Wait did not drain pending")
+	}
+}
+
+func TestWaitBlocksUntilDone(t *testing.T) {
+	release := make(chan struct{})
+	spawn := func(ctx context.Context, workID string, p Profile, prompt string, maxTurns int) Report {
+		<-release
+		return Report{Text: "blocking-done"}
+	}
+	m := New(Config{}, newTestProfiles(), spawn, newTestLogger())
+	workID, _ := m.Spawn(context.Background(), "fast", "x")
+
+	resultCh := make(chan Report, 1)
+	go func() {
+		rep, _, _ := m.Wait(context.Background(), workID)
+		resultCh <- rep
+	}()
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+
+	select {
+	case rep := <-resultCh:
+		if rep.Text != "blocking-done" {
+			t.Errorf("rep.Text = %q", rep.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return")
+	}
+}
+
+func TestWaitUnknownWorkID(t *testing.T) {
+	m := New(Config{}, newTestProfiles(), func(context.Context, string, Profile, string, int) Report { return Report{} }, newTestLogger())
+	_, found, err := m.Wait(context.Background(), "sub-deadbeef")
+	if found {
+		t.Error("Wait(unknown) found=true")
+	}
+	if err == nil {
+		t.Error("Wait(unknown) err=nil")
 	}
 }
 

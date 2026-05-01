@@ -193,6 +193,57 @@ func (m *Manager) ActiveCount() int {
 	return len(m.active)
 }
 
+// Wait blocks until the named subagent's report arrives, ctx cancels,
+// or the subagent is unknown. The returned bool reports whether the
+// report was found; on true the report is also removed from the
+// inbox so a subsequent Pending() drain won't see it twice.
+//
+// Lookup order:
+//  1. Already-pending? Take and return immediately.
+//  2. Currently-active? Block on its done channel, then take.
+//  3. Neither? Return found=false with an error.
+func (m *Manager) Wait(ctx context.Context, workID string) (Report, bool, error) {
+	m.mu.Lock()
+	if r, ok := m.takePendingLocked(workID); ok {
+		m.mu.Unlock()
+		return r, true, nil
+	}
+	ar, alive := m.active[workID]
+	m.mu.Unlock()
+
+	if !alive {
+		return Report{}, false, fmt.Errorf("no subagent with work_id %q (already drained or never existed?)", workID)
+	}
+
+	select {
+	case <-ar.done:
+		// fall through
+	case <-ctx.Done():
+		return Report{}, false, ctx.Err()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.takePendingLocked(workID); ok {
+		return r, true, nil
+	}
+	// runOne always appends to pending before closing done for async
+	// runs; for sync runs it doesn't, so fall back to ar.result.
+	return ar.result, true, nil
+}
+
+// takePendingLocked removes and returns the pending report with the
+// given workID. Caller must hold m.mu.
+func (m *Manager) takePendingLocked(workID string) (Report, bool) {
+	for i, r := range m.pending {
+		if r.WorkID == workID {
+			m.pending = append(m.pending[:i], m.pending[i+1:]...)
+			return r, true
+		}
+	}
+	return Report{}, false
+}
+
 // Cancel aborts the named subagent. Safe to call multiple times;
 // the second call returns an error (no such workID) because the
 // goroutine has already cleaned up. The cancellation propagates via
