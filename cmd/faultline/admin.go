@@ -117,6 +117,17 @@ func (a *adminServer) AttachSkills(sk adminhttp.SkillsAdmin) {
 	a.srv.SetSkillsAdmin(sk)
 }
 
+// AttachUpdater wires the self-update port. The Updater is always
+// constructed (even when [update] is disabled) so the get_version
+// tool works; this method is therefore called unconditionally when
+// admin is enabled.
+func (a *adminServer) AttachUpdater(u adminhttp.UpdateInspector) {
+	if a == nil {
+		return
+	}
+	a.srv.SetUpdateInspector(u)
+}
+
 // ToolObserver returns the tool-call observer the composition root
 // must inject into the primary tools.Executor when admin is enabled.
 // Returns nil when admin is disabled, in which case Executor.observer

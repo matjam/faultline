@@ -55,6 +55,18 @@
     </div>
   </div>
 
+  <div id="update-card"
+       hx-get="/admin/fragments/update"
+       hx-trigger="load, every 30s"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100 shadow-sm">
+      <div class="card-body">
+        <div class="skeleton h-6 w-32 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="tool-feed"
        hx-get="/admin/fragments/tools"
        hx-trigger="load, every 1s"

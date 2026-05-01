@@ -1,6 +1,7 @@
 package adminhttp
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/subagent"
 	"github.com/matjam/faultline/internal/tools"
+	"github.com/matjam/faultline/internal/update"
 )
 
 // AgentInspector is the read-only port the admin server uses to
@@ -41,6 +43,22 @@ type SubagentInspector interface {
 type SkillsAdmin interface {
 	ListAll() []skillsfs.AllSkill
 	SetEnabled(name string, enabled bool) error
+}
+
+// UpdateInspector is the read+write port for the self-update pane.
+// Implemented by *update.Updater. Reads (Enabled, CurrentVersion,
+// State) are pure in-memory lookups; State exposes the most recent
+// poll result without hitting GitHub. Apply is the destructive
+// "update now" action and is only invoked from the dedicated
+// endpoint behind a CSRF check.
+//
+// nil-allowed: when no updater is wired, the Update card on the
+// dashboard renders a disabled-feature placeholder.
+type UpdateInspector interface {
+	Enabled() bool
+	CurrentVersion() string
+	State() update.State
+	Apply(ctx context.Context) (*update.Result, error)
 }
 
 // ToolBuffer is the in-memory ring buffer of recent tool-call events.

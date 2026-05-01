@@ -1,0 +1,95 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <h2 class="card-title">Self-update</h2>
+      {{if .HasUpdater}}
+        {{if .Enabled}}
+        <span class="badge badge-success">auto-update on</span>
+        {{else}}
+        <span class="badge badge-ghost">auto-update off</span>
+        {{end}}
+      {{else}}
+      <span class="badge badge-ghost">not wired</span>
+      {{end}}
+    </div>
+
+    {{if .FlashOK}}
+    <div class="alert alert-success py-2">
+      <span>{{.FlashOK}}</span>
+    </div>
+    {{end}}
+    {{if .FlashErr}}
+    <div class="alert alert-error py-2">
+      <span>{{.FlashErr}}</span>
+    </div>
+    {{end}}
+
+    {{if .HasUpdater}}
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+      <div>
+        <div class="text-sm opacity-70">Current version</div>
+        <div class="font-mono text-lg">{{.CurrentVersion}}</div>
+      </div>
+      <div>
+        <div class="text-sm opacity-70">Latest known release</div>
+        <div class="font-mono text-lg">
+          {{if .LatestVersion}}
+            {{.LatestVersion}}
+            {{if .UpdateAvailable}}
+            <span class="badge badge-warning ml-2">new!</span>
+            {{else}}
+            <span class="badge badge-success ml-2">current</span>
+            {{end}}
+          {{else}}—{{end}}
+        </div>
+        <div class="text-xs opacity-60 mt-1">
+          last checked {{.LastChecked}}
+          {{if .Note}}· {{.Note}}{{end}}
+        </div>
+      </div>
+    </div>
+
+    {{if .Err}}
+    <div class="alert alert-warning mt-3">
+      <div class="flex flex-col gap-1">
+        <span class="font-semibold">Last check error</span>
+        <code class="text-xs whitespace-pre-wrap break-words">{{.Err}}</code>
+      </div>
+    </div>
+    {{end}}
+
+    {{if and .Enabled .UpdateAvailable}}
+    <div class="mt-4">
+      <form hx-post="/admin/update/apply"
+            hx-target="#update-card"
+            hx-swap="innerHTML"
+            hx-confirm="Apply the update now? The agent will shut down so the new binary can take over.">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+        <button type="submit" class="btn btn-primary">
+          Apply update {{.CurrentVersion}} → {{.LatestVersion}}
+        </button>
+      </form>
+      <p class="text-xs opacity-60 mt-2">
+        Apply downloads the release tarball, verifies it against
+        SHA256SUMS, swaps the binary in place, and triggers
+        graceful shutdown. The supervisor (or your configured
+        restart_mode) brings the new binary up.
+      </p>
+    </div>
+    {{else if not .Enabled}}
+    <p class="opacity-70 text-sm mt-3">
+      Self-update is disabled in <code>[update]</code>. Set
+      <code>enabled = true</code> to allow the agent (and this
+      dashboard) to apply updates.
+    </p>
+    {{end}}
+    {{else}}
+    <p class="opacity-70 text-sm">
+      The updater is not wired into the admin server. This usually
+      means an unusual composition path; the standard
+      <code>cmd/faultline/main.go</code> wiring should always
+      attach it.
+    </p>
+    {{end}}
+  </div>
+</div>
