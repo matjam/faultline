@@ -7,7 +7,7 @@ The agent can modify its own operating prompts, enabling self-directed behaviora
 ## Requirements
 
 - Go 1.26+ (only needed if building from source)
-- Docker (optional; for the Python sandbox feature)
+- Docker on the host machine (optional, for the sandbox / `skill_execute` features). The expected deployment is faultline running as a host process talking to the host's Docker daemon — see [Deployment](#deployment).
 - A Telegram bot token (optional; for collaborator communication)
 - An OpenAI-compatible API endpoint (local or remote)
 
@@ -85,6 +85,95 @@ The agent runs continuously until interrupted. Shutdown behavior:
 - **Second SIGINT/SIGTERM**: forces immediate exit.
 
 Under a process supervisor (systemd, Docker, Kubernetes), the first signal is sufficient for clean rolling restarts.
+
+Faultline refuses to start as root (`uid=0`). The agent has broad filesystem and network access, and the sandbox security model depends on `--user <unprivileged>:<unprivileged>` propagating an unprivileged host UID into containers — running as root collapses both protections. Run under a dedicated unprivileged user (e.g. `User=faultline` in a systemd unit, or `sudo -u faultline` for ad-hoc).
+
+## Deployment
+
+The expected deployment is **faultline as a host process** on a machine with Docker installed. Faultline talks to the host's Docker daemon to spawn ephemeral sandbox containers per `sandbox_*` and `skill_execute` call. This is the path that's been tested and is what the maintainer runs in production.
+
+### Native, under systemd (recommended)
+
+A minimal user-level systemd unit:
+
+```ini
+# ~/.config/systemd/user/faultline.service
+[Unit]
+Description=Faultline
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/data/faultline
+# Optional: wait for the LLM backend to come up before starting.
+ExecStartPre=/bin/bash -c 'until curl -sf http://localhost:5001/v1/models >/dev/null 2>&1; do sleep 5; done'
+ExecStart=/data/faultline/bin/faultline
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Layout under `/data/faultline`:
+
+```
+/data/faultline/
+├── bin/faultline           # the binary; auto-update writes here
+├── config.toml
+├── memory/                 # the agent's mutable memory store
+├── sandbox/                # per-sandbox scratch + cache
+├── skills/                 # operator-supplied (or skill_install-ed) skills
+├── logs/                   # daily-rotated agent logs and chat transcripts
+└── state.json              # conversation log, restored on restart
+```
+
+Enable and start:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now faultline.service
+journalctl --user -u faultline -f
+```
+
+The user that owns this unit (`User=` for system units, the invoking user for user units) needs:
+
+- Membership in the `docker` group (or equivalent) so it can talk to the daemon.
+- Read access to the LLM endpoint (network, API key in `config.toml`).
+- Write access to `/data/faultline` and everything under it.
+- **Not** to be `root` — faultline refuses to start at `uid=0`.
+
+A system-level unit (`/etc/systemd/system/faultline.service`) with `User=faultline` works the same way; pick whichever matches how you run other daemons.
+
+### Faultline in a container (untested; significant security trade-off)
+
+It is technically possible to run faultline itself inside a Docker container, mounting the host's Docker socket so the in-container agent can spawn sandbox containers on the host. **This has not been tested by the maintainer.** It is documented here for completeness, with the trade-off called out:
+
+- Mounting `/var/run/docker.sock` into a container is functionally equivalent to giving that container root on the host. Anyone with access to the socket can `docker run -v /:/host …` and escape immediately.
+- Faultline's `os.Getuid()==0` refusal does NOT protect against this. The check looks at the agent process's UID; it doesn't see that the process can talk to a privileged daemon.
+- A successful prompt injection or a malicious skill that bypasses the audit subagent can therefore compromise the host even though the in-container agent runs unprivileged.
+
+If you accept this trade-off — for the operational benefits of containerization (supervisor restart, log capture, resource limits) — the rough shape is:
+
+```yaml
+# docker-compose.yml — UNTESTED. Validate before relying on.
+services:
+  faultline:
+    image: ghcr.io/<your-fork-or-mirror>/faultline:<version>
+    user: "1000:1000"
+    restart: unless-stopped
+    volumes:
+      - /data/faultline:/data/faultline
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /data/faultline
+    command: ["./bin/faultline", "-config", "./config.toml"]
+    # Whatever network and DNS your LLM endpoint needs:
+    network_mode: host
+```
+
+Alternative without the socket-mount risk: **don't run faultline in a container.** The native systemd path above gets you supervisor restart, log capture, and resource limits via `MemoryMax=` / `CPUQuota=` etc. without the `docker.sock` blast radius.
+
+Note that there is no published `ghcr.io/matjam/faultline` image; the published image is the **sandbox** image (`ghcr.io/matjam/faultline-sandbox`) used by the agent's sandbox feature. If you containerize faultline itself, you build that image yourself.
 
 ## Auto-update
 
