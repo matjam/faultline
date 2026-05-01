@@ -118,6 +118,26 @@ func TestLoadConfigAllowsEmptyServers(t *testing.T) {
 	}
 }
 
+func TestLoadConfigCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "mcp.json")
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Servers) != 0 {
+		t.Fatalf("len(Servers) = %d, want 0", len(cfg.Servers))
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig after create: %v", err)
+	}
+	if loaded.Servers == nil {
+		t.Fatal("created config should use an empty server array, not null")
+	}
+}
+
 func TestLoadConfigAcceptsEnvironmentAlias(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	contents := `{

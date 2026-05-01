@@ -236,6 +236,13 @@ func toolDefName(serverName, toolName string) string {
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			cfg := Config{Servers: []ServerConfig{}}
+			if err := SaveConfig(path, cfg); err != nil {
+				return Config{}, err
+			}
+			return cfg, nil
+		}
 		return Config{}, fmt.Errorf("read mcp config: %w", err)
 	}
 
