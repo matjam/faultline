@@ -285,12 +285,21 @@ The convention is `type(scope)?: short subject`. Common types:
 |------|-------------------|----------|
 | `feat:` | Minor bump (1.2.0 -> 1.3.0) | New user-facing feature |
 | `fix:` | Patch bump (1.2.0 -> 1.2.1) | Bug fix |
-| `feat!:` or footer `BREAKING CHANGE:` | Major bump (1.2.0 -> 2.0.0) | Backwards-incompatible change |
+| `feat!:` or footer `BREAKING CHANGE:` | Major bump (1.2.0 -> 2.0.0) | Backwards-incompatible change. **Ask the maintainer first.** |
 | `docs:` | No bump | Documentation only |
 | `refactor:` | No bump | Code restructuring with no behavior change |
 | `test:` | No bump | Test-only changes |
 | `chore:` | No bump | Build, deps, repo housekeeping |
 | `ci:` | No bump | CI/release workflow changes |
+
+**Major bumps are a maintainer decision, not an automatic one.** Even if a
+change is technically backwards-incompatible, the agent / contributor
+opening a PR should not unilaterally tag it `feat!:` or attach a
+`BREAKING CHANGE:` footer. Ask first. The maintainer accumulates
+breaking changes and decides when there's enough to warrant a major
+release. To force an explicit version when one is wanted, the
+maintainer can add a `Release-As: 2.0.0` footer to a commit; release-please
+honours it on the next run.
 
 The simplest discipline for keeping `main`'s commit log clean:
 
