@@ -48,7 +48,7 @@ RUN pacman -Syu --noconfirm --needed \
         jq ripgrep fd \
         less tree which \
         tar gzip unzip zip \
-        gnu-netcat \
+        openbsd-netcat \
         make \
         python python-pip \
         nodejs npm \
