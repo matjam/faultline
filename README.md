@@ -6,68 +6,70 @@ The agent can modify its own operating prompts, enabling self-directed behaviora
 
 ## Requirements
 
-- Go 1.25+
-- Docker (for the Python sandbox feature)
-- A Telegram bot token (optional, for collaborator communication)
+- Go 1.26+ (only needed if building from source)
+- Docker (optional; for the Python sandbox feature)
+- A Telegram bot token (optional; for collaborator communication)
 - An OpenAI-compatible API endpoint (local or remote)
 
-## Building
+## Installation
+
+Pre-built binaries are published on every tagged release for `linux/amd64`, `linux/arm64`, and `darwin/arm64`.
 
 ```sh
-go build -o faultline .
+# Pick the right tarball for your platform from the latest release at
+# https://github.com/matjam/faultline/releases/latest
+curl -L -O https://github.com/matjam/faultline/releases/latest/download/faultline_<version>_linux_x86_64.tar.gz
+curl -L -O https://github.com/matjam/faultline/releases/latest/download/SHA256SUMS
+
+# Verify
+sha256sum -c SHA256SUMS --ignore-missing
+
+# Extract and install
+tar xzf faultline_<version>_linux_x86_64.tar.gz
+sudo install faultline /usr/local/bin/        # or wherever you prefer
 ```
 
-The binary embeds all default prompt templates from `prompts/` at compile time.
+The release tarball also contains `LICENSE`, `README.md`, `AGENTS.md`, and `config.example.toml`.
+
+## Building from source
+
+```sh
+go build -o faultline ./cmd/faultline
+```
+
+For a build with version metadata baked in (matching what release builds embed):
+
+```sh
+go build \
+  -ldflags="-X github.com/matjam/faultline/internal/version.Version=$(git describe --tags --always) \
+            -X github.com/matjam/faultline/internal/version.Commit=$(git rev-parse --short HEAD) \
+            -X github.com/matjam/faultline/internal/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o faultline ./cmd/faultline
+```
+
+The binary embeds the default prompt templates from `internal/prompts/templates/` at compile time.
+
+Check what version a binary reports:
+
+```sh
+./faultline -version
+```
 
 ## Configuration
 
-Faultline reads a TOML configuration file (default: `./config.toml`). Missing fields use sensible defaults.
+Faultline reads a TOML config file (default: `./config.toml`). Missing fields fall back to sensible defaults.
 
-```toml
-[api]
-url = "http://localhost:5001/v1"   # OpenAI-compatible API endpoint
-key = ""                            # API key (defaults to "not-needed" if empty)
-model = "qwen"                      # Model name
-kobold_extras = true                # Auto-detect KoboldCpp extras (real tokenizer,
-                                    # generation aborts, perf metrics). Safe to leave on
-                                    # for non-KoboldCpp backends; detection fails silently.
+The repository includes [`config.example.toml`](config.example.toml) — a heavily-commented copy of every section with inline documentation for each field. Copy it to your deployment as `config.toml` and edit. The same defaults are returned by `config.Default()` in code.
 
-[agent]
-memory_dir = "./memory"             # Directory for persistent memory files
-max_tokens = 262144                 # Maximum context window size
-temperature = 0.8                   # LLM temperature
-max_response_tokens = 4096          # Max tokens per LLM response
-compaction_threshold = 150000       # Token count triggering context compaction
+Key sections:
 
-[telegram]
-token = ""                          # Telegram bot token
-chat_id = 0                         # Telegram chat ID for collaborator
-
-[log]
-level = "info"                      # Console log level (debug/info/warn/error)
-dir = "./logs"                      # Log file directory
-
-[sandbox]
-enabled = false                     # Enable Python sandbox
-image = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
-dir = "./sandbox"                   # Sandbox working directory
-timeout = "5m"                      # Script execution timeout
-network = false                     # Allow network access in sandbox
-memory_limit = "512m"               # Docker memory limit
-
-[limits]
-# Per-entry cap on "Recent Memories" content shown in the system prompt
-# (5 entries surface per turn). When clipped, a hint pointing at memory_read
-# is appended so the agent knows how to load the full file.
-recent_memory_chars = 8000
-# Per-result cap on memory_search output (5 results per query).
-memory_search_result_chars = 6000
-# Cap on combined stdout/stderr returned by sandbox_execute / sandbox_shell.
-# Larger output should be written to /output/ and read back with sandbox_read.
-sandbox_output_chars = 64000
-```
-
-Set any limit to `0` to disable the cap and pass full content through.
+- `[api]` — LLM endpoint URL, key, model, KoboldCpp auto-detection.
+- `[agent]` — memory directory, context limits, sampler parameters, state persistence, sleep cap.
+- `[telegram]` — optional collaborator messaging.
+- `[log]` — console level + log directory.
+- `[sandbox]` — optional Python execution via Docker.
+- `[email]` — optional IMAP email reading.
+- `[limits]` — content-size caps for memory excerpts, search results, sandbox output.
 
 ## Running
 
@@ -77,8 +79,10 @@ Set any limit to `0` to disable the cap and pass full content through.
 
 The agent runs continuously until interrupted. Shutdown behavior:
 
-- **First SIGINT/SIGTERM**: Triggers graceful shutdown. The agent is given up to 10 turns (2-minute timeout) to save its state to memory.
-- **Second SIGINT/SIGTERM**: Forces immediate exit.
+- **First SIGINT/SIGTERM**: triggers graceful shutdown. The agent gets up to 10 turns (2-minute timeout) to save state to memory.
+- **Second SIGINT/SIGTERM**: forces immediate exit.
+
+Under a process supervisor (systemd, Docker, Kubernetes), the first signal is sufficient for clean rolling restarts.
 
 ## Features
 
@@ -93,6 +97,8 @@ An in-memory BM25 search index is built from all memory files on startup and reb
 ### Web Browsing
 
 The agent can fetch web pages, which are converted from HTML to readable markdown text. Results are cached with a TTL to avoid redundant fetches. Long pages can be paginated with offset/length parameters.
+
+A separate `wiki_fetch` tool pulls plain-text article extracts directly from the MediaWiki API for cheap Wikipedia reads — no HTML parsing, much smaller token footprint than `web_fetch` for the same article.
 
 ### Context Compaction
 
@@ -110,11 +116,11 @@ Detection is best-effort and bounded by a 5s timeout at startup. If the backend 
 
 ### Self-Modifying Prompts
 
-The agent's operating prompts (`system.md`, `compaction.md`, `cycle_start.md`, `continue.md`, `shutdown.md`) are mutable files in the memory store. The agent can read and rewrite them, changing its own behavior across context compactions.
+The agent's operating prompts (`system.md`, `compaction.md`, `cycle-start.md`, `continue.md`, `shutdown.md`) are mutable files in the memory store. The agent can read and rewrite them, changing its own behavior across context compactions.
 
-The default contents of these prompts live in `prompts/*.md` in the source tree and are embedded into the binary at build time via `//go:embed`. At runtime they are seeded into `<memory_dir>/prompts/*.md` on first startup. After that, the running agent reads from the memory store, not the embedded copies. This means:
+The default contents of these prompts live in `internal/prompts/templates/*.md` in the source tree and are embedded into the binary at build time via `//go:embed`. At runtime they are seeded into `<memory_dir>/prompts/*.md` on first startup. After that, the running agent reads from the memory store, not the embedded copies. This means:
 
-- Editing files under `prompts/` in the source tree only affects fresh installs (or installs whose memory store has had those files deleted). To rebuild from defaults, delete `<memory_dir>/prompts/` and restart.
+- Editing files under `internal/prompts/templates/` in the source tree only affects fresh installs (or installs whose memory store has had those files deleted). To rebuild from defaults, delete `<memory_dir>/prompts/` and restart.
 - Edits the agent makes to its own prompts persist in the memory store and survive restarts.
 - Edits to the embedded defaults require rebuilding the binary.
 
@@ -124,19 +130,32 @@ Bidirectional communication with a human collaborator via Telegram. Incoming mes
 
 ### Python Sandbox
 
-An optional Docker-based execution environment for Python scripts. Uses `uv` for package management. Containers are ephemeral (created per execution, removed after). The sandbox has a flat file structure (`scripts/`, `input/`, `output/`) and supports configurable network access, memory limits, and execution timeouts.
+An optional Docker-based execution environment for Python scripts. Uses [`uv`](https://github.com/astral-sh/uv) for package management. Containers are ephemeral (created per execution, removed after). The sandbox has a flat file structure (`scripts/`, `input/`, `output/`) and supports configurable network access, memory limits, and execution timeouts.
+
+### IMAP Email (optional)
+
+When `[email]` is configured, the agent gets an `email_fetch` tool that opens a short-lived IMAP connection per call. Useful for letting the agent pick up things its operator emails to a dedicated inbox.
 
 ## Tools
 
-The agent has access to the following tool categories:
-
 | Category | Tools |
 |----------|-------|
-| **Internet** | `web_fetch` |
+| **Internet** | `web_fetch`, `wiki_fetch` |
 | **Memory** | `memory_read`, `memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`, `memory_list`, `memory_list_trash`, `memory_empty_trash`, `memory_search`, `memory_grep` |
-| **System** | `context_status`, `get_time`, `send_message` |
-| **Sandbox** | `sandbox_exec`, `sandbox_write`, `sandbox_read`, `sandbox_list`, `sandbox_delete`, `sandbox_install`, `sandbox_packages` (when enabled) |
+| **System** | `context_status`, `get_time`, `sleep`, `send_message` |
+| **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |
+| **Email** (when configured) | `email_fetch` |
+
+## Architecture
+
+Faultline follows hexagonal (ports & adapters) architecture: the agent loop is the domain hexagon, and external systems (LLM, memory, telegram, sandbox, IMAP, state persistence) are adapters behind interfaces the domain owns. See [AGENTS.md](AGENTS.md) for the full layout, port table, and per-package detail.
+
+## Contributing
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, etc.). [release-please](https://github.com/googleapis/release-please) derives version bumps and changelog entries from the commit log on `main`. The recommended workflow: open PRs with whatever messy commits you like, set the PR title to a single conventional-commit subject, and squash-merge.
+
+See AGENTS.md for the full conventional-commits table and other contributor notes.
 
 ## License
 
-See LICENSE file for details.
+See [LICENSE](LICENSE) for details.
