@@ -73,6 +73,11 @@ type Deps struct {
 	// nil-allowed: when not set, the Update card renders a
 	// "updater not wired" placeholder.
 	Update UpdateInspector
+
+	// Config is the read+write port for the configuration editor
+	// page. nil-allowed; the Config card surfaces a not-wired
+	// placeholder otherwise.
+	Config ConfigStore
 }
 
 // Server is the HTTP admin UI server. Construct with New, run with
@@ -111,6 +116,7 @@ var fragmentTemplates = []string{
 	"frag_subagents.html",
 	"frag_skills.html",
 	"frag_update.html",
+	"frag_config.html",
 }
 
 // New parses templates and prepares the static-file sub-FS. Returns
@@ -247,6 +253,11 @@ func (s *Server) SetUpdateInspector(u UpdateInspector) {
 	s.deps.Update = u
 }
 
+// SetConfigStore wires the read+write configuration port.
+func (s *Server) SetConfigStore(c ConfigStore) {
+	s.deps.Config = c
+}
+
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
 		if s.srv == nil {
@@ -282,6 +293,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
 	mux.HandleFunc("GET /admin/fragments/skills", s.requireAuth(s.handleFragSkills))
 	mux.HandleFunc("GET /admin/fragments/update", s.requireAuth(s.handleFragUpdate))
+	mux.HandleFunc("GET /admin/fragments/config", s.requireAuth(s.handleFragConfig))
 
 	// Skills toggle action. Re-renders the skills fragment so
 	// HTMX can hx-swap the updated card without a full page load.
@@ -292,6 +304,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// a flash explaining what happened, but the browser will
 	// likely lose the connection mid-shutdown — that's fine.
 	mux.HandleFunc("POST /admin/update/apply", s.requireAuth(s.handleUpdateApply))
+
+	// Config actions: validate, save, restart. Each re-renders
+	// the config fragment with a flash so the operator sees the
+	// outcome inline.
+	mux.HandleFunc("POST /admin/config/validate", s.requireAuth(s.handleConfigValidate))
+	mux.HandleFunc("POST /admin/config/save", s.requireAuth(s.handleConfigSave))
+	mux.HandleFunc("POST /admin/config/restart", s.requireAuth(s.handleConfigRestart))
 
 	// Anything not under /admin gets 404. We intentionally don't
 	// take over /; the agent doesn't expose anything else on this

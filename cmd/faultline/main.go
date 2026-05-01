@@ -418,6 +418,18 @@ func main() {
 		// (mostly empty) state, and the UI surfaces "auto-update
 		// off".
 		adminSrv.AttachUpdater(updater)
+
+		// Configuration store: lets the operator edit
+		// config.toml from the UI, validate, save, and trigger a
+		// graceful restart through the same closeShutdown the
+		// SIGINT handler and updater use.
+		cfgStore, err := newFileConfigStore(*configPath, logger, func() { closeShutdown(nil) })
+		if err != nil {
+			logger.Error("admin: failed to construct config store", "error", err)
+			os.Exit(1)
+		}
+		adminSrv.AttachConfig(cfgStore)
+
 		adminSrv.Start(ctx)
 	}
 
