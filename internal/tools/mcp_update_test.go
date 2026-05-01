@@ -144,6 +144,42 @@ func TestMCPConfigUpdateRejectsHashMismatch(t *testing.T) {
 	}
 }
 
+func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := mcp.SaveConfig(path, mcp.Config{Servers: []mcp.ServerConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+
+	configJSON := `{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}`
+	proposal := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: `{"config":` + configJSON + `}`,
+		},
+	})
+
+	for _, want := range []string{
+		"```diff\n",
+		"diff --git a/mcp.json b/mcp.json",
+		"--- a/mcp.json",
+		"+++ b/mcp.json",
+		`-  "servers": []`,
+		`+      "name": "github",`,
+		`+      "url": "https://example.invalid/mcp"`,
+		"```",
+	} {
+		if !strings.Contains(proposal, want) {
+			t.Fatalf("proposal diff missing %q:\n%s", want, proposal)
+		}
+	}
+}
+
 func TestSubagentDoesNotAdvertiseConfigUpdateTools(t *testing.T) {
 	te := New(Deps{
 		Mode:                 ModeSubagent,

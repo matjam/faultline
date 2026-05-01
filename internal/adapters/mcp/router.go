@@ -29,3 +29,23 @@ func (r *Router) CallTool(ctx context.Context, serverName, toolName string, args
 	}
 	return caller.CallTool(ctx, serverName, toolName, args)
 }
+
+// Close releases transport clients that hold long-lived resources.
+func (r *Router) Close() error {
+	var firstErr error
+	closed := map[Caller]struct{}{}
+	for _, caller := range r.callers {
+		if _, ok := closed[caller]; ok {
+			continue
+		}
+		closed[caller] = struct{}{}
+		closer, ok := caller.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}

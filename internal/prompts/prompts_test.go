@@ -175,6 +175,14 @@ func TestDefaultSystemPromptIncludesMCPGuidance(t *testing.T) {
 		"mcp_discover_tools",
 		"allow_tools",
 		"collaborator approval",
+		"mcp/<server>",
+		"stdio MCP",
+		"runtime_notes",
+		"/output",
+		"/mcp/<server>",
+		"npm install --prefix /node",
+		"/node/node_modules/.bin",
+		"git-diff-style Markdown code block",
 	} {
 		if !strings.Contains(defaultSystem, want) {
 			t.Fatalf("default system prompt missing %q", want)

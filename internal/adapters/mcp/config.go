@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/matjam/faultline/internal/llm"
 )
@@ -48,6 +50,7 @@ type ServerConfig struct {
 	Transport  string            `json:"transport"`
 	Command    string            `json:"command,omitempty"`
 	Args       []string          `json:"args,omitempty"`
+	WorkDir    string            `json:"workdir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	URL        string            `json:"url,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
@@ -112,6 +115,7 @@ type DiscoveryStatus struct {
 	Server         ServerStatus           `json:"server"`
 	Tools          []DiscoveredToolStatus `json:"tools"`
 	DiscoveryError string                 `json:"discovery_error,omitempty"`
+	RuntimeNotes   []string               `json:"runtime_notes,omitempty"`
 }
 
 // DiscoveredToolStatus is one tool in status/discovery output.
@@ -136,6 +140,9 @@ func (c ServerConfig) Validate() error {
 		if c.Command == "" {
 			return fmt.Errorf("command is required for stdio transport")
 		}
+		if c.WorkDir != "" && !isSandboxMCPWorkDir(c.WorkDir) {
+			return fmt.Errorf("workdir must be under /mcp for stdio transport")
+		}
 	case "http":
 		if c.URL == "" {
 			return fmt.Errorf("url is required for http transport")
@@ -145,6 +152,19 @@ func (c ServerConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// SandboxWorkDir returns the container working directory for a stdio server.
+func (c ServerConfig) SandboxWorkDir() string {
+	if c.WorkDir != "" {
+		return path.Clean(c.WorkDir)
+	}
+	return path.Join("/mcp", c.Name)
+}
+
+func isSandboxMCPWorkDir(value string) bool {
+	clean := path.Clean(value)
+	return clean == "/mcp" || strings.HasPrefix(clean, "/mcp/")
 }
 
 // AllowedTool reports whether name is exactly present in allow_tools.
@@ -185,6 +205,16 @@ func (d DiscoveredServer) Status() DiscoveryStatus {
 		Server:         d.Server.Status(),
 		Tools:          tools,
 		DiscoveryError: d.DiscoveryError,
+		RuntimeNotes:   d.Server.runtimeNotes(),
+	}
+}
+
+func (c ServerConfig) runtimeNotes() []string {
+	if c.Transport != "stdio" {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("stdio MCP runs with working directory %s.", c.SandboxWorkDir()),
 	}
 }
 

@@ -32,9 +32,9 @@ reproducible artifact, not the Dockerfile inputs.
 
 - `sh` and `uv` on `PATH`
 - Mounts: `/scripts` (ro), `/input` (ro), `/output` (rw), `/venv` (rw),
-  `/cache` (rw), `/pyproject.toml`, `/uv.lock`
+  `/node` (rw), `/mcp` (rw), `/cache` (rw), `/pyproject.toml`, `/uv.lock`
 - Env: `UV_CACHE_DIR=/cache`, `UV_LINK_MODE=copy`,
-  `UV_PROJECT_ENVIRONMENT=/venv`
+  `UV_PROJECT_ENVIRONMENT=/venv`, `PATH=/node/node_modules/.bin:...`
 - `--user UID:GID` (host user; image must run as any UID)
 - `--network=none` by default
 

@@ -7,7 +7,7 @@
 #
 #   - sh / bash on PATH
 #   - uv on PATH (drives Python script execution and package management)
-#   - mounts at /scripts /input /output /venv /cache /pyproject.toml /uv.lock
+#   - mounts at /scripts /input /output /venv /node /mcp /cache /pyproject.toml /uv.lock
 #   - --user UID:GID (host user; image must run unprivileged)
 #
 # Beyond that, anything on PATH inside the container is reachable by the
@@ -95,7 +95,7 @@ RUN curl -fsSL https://bun.sh/install | bash \
 ENV UV_CACHE_DIR=/cache \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/venv \
-    PATH=/usr/local/bin:/usr/bin:/bin
+    PATH=/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 
 # ---------------------------------------------------------------------------
 # Defense-in-depth: bake in a non-root default USER.

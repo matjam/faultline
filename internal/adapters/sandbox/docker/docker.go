@@ -8,11 +8,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -71,6 +73,14 @@ version = "0.1.0"
 description = "Faultline agent sandbox environment"
 requires-python = ">=3.12"
 dependencies = []
+`
+
+const defaultNodePackageJSON = `{
+  "name": "faultline-node-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {}
+}
 `
 
 // NewSandbox creates and initializes a sandbox environment.
@@ -166,7 +176,7 @@ func (s *Sandbox) logExec(operation string, detail string, duration time.Duratio
 
 func (s *Sandbox) init() error {
 	// Create directories
-	for _, sub := range []string{"scripts", "input", "output", "venv", "cache"} {
+	for _, sub := range []string{"scripts", "input", "output", "venv", "cache", "node", "mcp"} {
 		if err := os.MkdirAll(filepath.Join(s.dir, sub), 0755); err != nil {
 			return fmt.Errorf("create %s: %w", sub, err)
 		}
@@ -199,6 +209,14 @@ source = { virtual = "." }
 		if err := os.WriteFile(lockPath, []byte(initialLock), 0644); err != nil {
 			return fmt.Errorf("create uv.lock: %w", err)
 		}
+	}
+
+	nodePackagePath := filepath.Join(s.dir, "node", "package.json")
+	if _, err := os.Stat(nodePackagePath); os.IsNotExist(err) {
+		if err := os.WriteFile(nodePackagePath, []byte(defaultNodePackageJSON), 0644); err != nil {
+			return fmt.Errorf("create node/package.json: %w", err)
+		}
+		s.logger.Info("created initial node package.json", "path", nodePackagePath)
 	}
 
 	return nil
@@ -534,15 +552,21 @@ func (s *Sandbox) dockerArgs(needsNetwork bool, containerName string) []string {
 		"-v", filepath.Join(s.dir, "input") + ":/input:ro",
 		"-v", filepath.Join(s.dir, "output") + ":/output:rw",
 		"-v", filepath.Join(s.dir, "venv") + ":/venv:rw",
+		"-v", filepath.Join(s.dir, "node") + ":/node:rw",
+		"-v", filepath.Join(s.dir, "mcp") + ":/mcp:rw",
 		// Mount project files
 		"-v", filepath.Join(s.dir, "pyproject.toml") + ":/pyproject.toml:rw",
 		"-v", filepath.Join(s.dir, "uv.lock") + ":/uv.lock:rw",
 		// Cache directory (persistent, avoids permission issues with --user)
 		"-v", filepath.Join(s.dir, "cache") + ":/cache:rw",
 		// Environment
+		"-e", "HOME=/cache/home",
+		"-e", "npm_config_cache=/cache/npm",
+		"-e", "XDG_CACHE_HOME=/cache",
 		"-e", "UV_CACHE_DIR=/cache",
 		"-e", "UV_LINK_MODE=copy",
 		"-e", "UV_PROJECT_ENVIRONMENT=/venv",
+		"-e", "PATH=/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
 		// Working directory
 		"-w", "/",
 		// Resource limits
@@ -592,6 +616,159 @@ func (s *Sandbox) dockerRun(ctx context.Context, needsNetwork bool, command ...s
 		return string(output), fmt.Errorf("docker run failed: %w\nOutput: %s", err, string(output))
 	}
 	return string(output), nil
+}
+
+// ---------------------------------------------------------------------------
+// MCP stdio execution
+// ---------------------------------------------------------------------------
+
+// MCPStdioProcess is an interactive process running inside the sandbox
+// container for stdio MCP JSON-RPC.
+type MCPStdioProcess struct {
+	cmd           *exec.Cmd
+	containerName string
+	timeout       time.Duration
+	cancel        context.CancelFunc
+	stdin         io.WriteCloser
+	stdout        io.Reader
+	stderr        io.Reader
+	logger        *slog.Logger
+	ctx           context.Context
+}
+
+// StartStdio starts an interactive command with the regular sandbox mounts.
+func (s *Sandbox) StartStdio(ctx context.Context, name, command string, args []string, cwd string, env map[string]string) (*MCPStdioProcess, error) {
+	if command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+	if cwd == "" {
+		cwd = "/mcp/" + name
+	}
+	hostCWD, err := s.mcpStdioHostWorkDir(cwd)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(hostCWD, 0o755); err != nil {
+		return nil, fmt.Errorf("create mcp workdir: %w", err)
+	}
+
+	containerName := "faultline-mcp-" + randomID()
+	runCtx, cancel := context.WithCancel(ctx)
+	dockerArgs := s.mcpStdioArgs(containerName, cwd, env, command, args)
+	cmd := exec.CommandContext(runCtx, "docker", dockerArgs...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open mcp stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open mcp stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open mcp stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start mcp container: %w", err)
+	}
+	s.logger.Debug("docker run (mcp stdio)", "container", containerName, "cwd", cwd, "network", s.network)
+	return &MCPStdioProcess{
+		cmd:           cmd,
+		containerName: containerName,
+		timeout:       s.timeout,
+		cancel:        cancel,
+		stdin:         stdin,
+		stdout:        stdout,
+		stderr:        stderr,
+		logger:        s.logger,
+		ctx:           runCtx,
+	}, nil
+}
+
+// Stdin returns the process stdin writer.
+func (p *MCPStdioProcess) Stdin() io.WriteCloser { return p.stdin }
+
+// Stdout returns the process stdout reader.
+func (p *MCPStdioProcess) Stdout() io.Reader { return p.stdout }
+
+// Stderr returns the process stderr reader.
+func (p *MCPStdioProcess) Stderr() io.Reader { return p.stderr }
+
+// Wait waits for the process to exit and kills containers when the parent
+// context is cancelled.
+func (p *MCPStdioProcess) Wait() error {
+	defer p.cancel()
+	err := p.cmd.Wait()
+	if p.ctx.Err() != nil {
+		if p.logger != nil {
+			p.logger.Warn("mcp stdio context cancelled, killing container", "container", p.containerName)
+		}
+		killCmd := exec.Command("docker", "kill", p.containerName)
+		_ = killCmd.Run()
+	}
+	return err
+}
+
+// Kill terminates the container backing the stdio process.
+func (p *MCPStdioProcess) Kill() error {
+	p.cancel()
+	killCmd := exec.Command("docker", "kill", p.containerName)
+	return killCmd.Run()
+}
+
+func (s *Sandbox) mcpStdioArgs(containerName, cwd string, env map[string]string, command string, commandArgs []string) []string {
+	args := []string{
+		"run", "--rm", "-i",
+		"--name", containerName,
+		"-w", cwd,
+		"--memory", s.memoryLimit,
+		"--user", fmt.Sprintf("%d:%d", s.uid, s.gid),
+		"--security-opt", "no-new-privileges",
+		"-v", filepath.Join(s.dir, "scripts") + ":/scripts:ro",
+		"-v", filepath.Join(s.dir, "input") + ":/input:ro",
+		"-v", filepath.Join(s.dir, "output") + ":/output:rw",
+		"-v", filepath.Join(s.dir, "venv") + ":/venv:rw",
+		"-v", filepath.Join(s.dir, "node") + ":/node:rw",
+		"-v", filepath.Join(s.dir, "mcp") + ":/mcp:rw",
+		"-v", filepath.Join(s.dir, "cache") + ":/cache:rw",
+		"-e", "HOME=/cache/home",
+		"-e", "npm_config_cache=/cache/npm",
+		"-e", "XDG_CACHE_HOME=/cache",
+		"-e", "UV_CACHE_DIR=/cache",
+		"-e", "UV_LINK_MODE=copy",
+		"-e", "UV_PROJECT_ENVIRONMENT=/venv",
+		"-e", "PATH=/node/node_modules/.bin:/usr/local/bin:/usr/bin:/bin",
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "-e", key+"="+env[key])
+	}
+	if !s.network {
+		args = append(args, "--network=none")
+	}
+	args = append(args, s.image, command)
+	args = append(args, commandArgs...)
+	return args
+}
+
+func (s *Sandbox) mcpStdioHostWorkDir(cwd string) (string, error) {
+	rel, ok := strings.CutPrefix(filepath.Clean(cwd), string(filepath.Separator)+"mcp"+string(filepath.Separator))
+	if !ok {
+		return "", fmt.Errorf("mcp stdio workdir must be under /mcp")
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+		return "", fmt.Errorf("mcp stdio workdir must stay inside /mcp")
+	}
+	return filepath.Join(s.dir, "mcp", clean), nil
 }
 
 // ---------------------------------------------------------------------------

@@ -213,6 +213,10 @@ type MCPConfig struct {
 	// AllowAgentEditConfig gates the MCP config-update tools. Even when
 	// true, writes still require raw collaborator approval.
 	AllowAgentEditConfig bool `toml:"allow_agent_edit_config"`
+
+	// StdioIdleTimeout closes long-lived stdio MCP containers after
+	// inactivity. Defaults to 10m.
+	StdioIdleTimeout duration `toml:"stdio_idle_timeout"`
 }
 
 // EmbeddingsConfig holds optional semantic-search settings. When
@@ -514,8 +518,9 @@ func Default() *Config {
 			RestartMode:   "exit",
 		},
 		MCP: MCPConfig{
-			Enabled:    false,
-			ConfigFile: "./mcp.json",
+			Enabled:          false,
+			ConfigFile:       "./mcp.json",
+			StdioIdleTimeout: duration(10 * time.Minute),
 		},
 		Embeddings: EmbeddingsConfig{
 			Enabled:   false,
@@ -574,6 +579,9 @@ func Load(path string) (*Config, error) {
 
 	if cfg.MCP.ConfigFile == "" {
 		cfg.MCP.ConfigFile = "./mcp.json"
+	}
+	if cfg.MCP.StdioIdleTimeout.Duration() <= 0 {
+		cfg.MCP.StdioIdleTimeout = duration(10 * time.Minute)
 	}
 
 	// Embeddings: backfill defaults when the operator enables the

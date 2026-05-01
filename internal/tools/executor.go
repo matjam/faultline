@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -1143,12 +1144,15 @@ func New(deps Deps) *Executor {
 	}
 }
 
-// Close is a no-op in the current implementation. The shared WebCache
+// Close releases resources owned by the primary executor. The shared WebCache
 // is owned by the composition root, not the Executor, because multiple
-// Executor instances (primary + subagents) share one cache and a
-// child's Close must not stop it. Kept on the Tools port surface as a
-// future hook for per-Executor cleanup.
-func (te *Executor) Close() {}
+// Executor instances (primary + subagents) share one cache and a child's Close
+// must not stop it.
+func (te *Executor) Close() {
+	if te.mode == ModePrimary {
+		closeMCPCaller(te.mcpCaller)
+	}
+}
 
 // reindexDir re-indexes all .md files under a memory directory path.
 // Used after directory-level operations (delete, move, restore) to keep the
@@ -1334,7 +1338,7 @@ func (te *Executor) mcpManagementToolDefs() []llm.Tool {
 			Type: llm.ToolTypeFunction,
 			Function: &llm.FunctionDef{
 				Name:        "mcp_discover_tools",
-				Description: "Show discovered MCP tools and whether each is currently allowlisted/callable. Unallowlisted tools are listed for review but are not callable.",
+				Description: "Show discovered MCP tools and whether each is currently allowlisted/callable. Check discovery_error and runtime_notes when setup fails. Unallowlisted tools are listed for review but are not callable.",
 				Parameters:  params,
 			},
 		},
@@ -1412,12 +1416,90 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	if err := args.Config.Validate(); err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
+	diff, err := te.mcpConfigDiff(args.Config)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
 
 	id, hash, approvalText, err := te.mcpApprovals.Propose(args.Config)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\ndiff_hash: %s\nAsk the collaborator to reply exactly with:\n%s", id, hash, approvalText)
+	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\ndiff_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nAsk the collaborator to reply exactly with:\n%s", id, hash, diff, approvalText)
+}
+
+func (te *Executor) mcpConfigDiff(proposed mcp.Config) (string, error) {
+	current := mcp.Config{Servers: []mcp.ServerConfig{}}
+	currentJSON, err := canonicalMCPConfigJSON(current)
+	if err != nil {
+		return "", err
+	}
+	if te.mcpConfigFile != "" {
+		data, err := os.ReadFile(te.mcpConfigFile)
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("read current MCP config for diff: %w", err)
+		}
+		if err == nil {
+			if err := json.Unmarshal(data, &current); err != nil {
+				return "", fmt.Errorf("parse current MCP config for diff: %w", err)
+			}
+			if err := current.Validate(); err != nil {
+				return "", fmt.Errorf("validate current MCP config for diff: %w", err)
+			}
+			currentJSON = string(data)
+		}
+	}
+
+	proposedJSON, err := canonicalMCPConfigJSON(proposed)
+	if err != nil {
+		return "", err
+	}
+	return fullFileUnifiedDiff(filepath.Base(te.mcpConfigFile), currentJSON, proposedJSON), nil
+}
+
+func canonicalMCPConfigJSON(cfg mcp.Config) (string, error) {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal MCP config for diff: %w", err)
+	}
+	return string(append(data, '\n')), nil
+}
+
+func fullFileUnifiedDiff(path, current, proposed string) string {
+	if path == "" || path == "." {
+		path = "mcp.json"
+	}
+	if current == proposed {
+		return fmt.Sprintf("diff --git a/%s b/%s\n", path, path)
+	}
+
+	currentLines := splitDiffLines(current)
+	proposedLines := splitDiffLines(proposed)
+	var b strings.Builder
+	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
+	fmt.Fprintf(&b, "--- a/%s\n", path)
+	fmt.Fprintf(&b, "+++ b/%s\n", path)
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", len(currentLines), len(proposedLines))
+	for _, line := range currentLines {
+		b.WriteString("-")
+		b.WriteString(line)
+	}
+	for _, line := range proposedLines {
+		b.WriteString("+")
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+func splitDiffLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.SplitAfter(s, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string {
@@ -1448,10 +1530,19 @@ func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string
 		if err != nil {
 			return fmt.Sprintf("MCP config updated on disk, but live reload failed: %s", err)
 		}
+		closeMCPCaller(te.mcpCaller)
 		te.mcpCaller = caller
 		te.mcpDiscovered = discovered
 	}
 	return "MCP config updated."
+}
+
+func closeMCPCaller(caller mcp.Caller) {
+	closer, ok := caller.(interface{ Close() error })
+	if !ok {
+		return
+	}
+	_ = closer.Close()
 }
 
 // RecordCollaboratorMessage records raw collaborator text before it is wrapped

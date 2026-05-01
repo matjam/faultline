@@ -13,6 +13,7 @@ func TestServerConfigValidateRequiresAllowlistOnly(t *testing.T) {
 		Name:       "github",
 		Transport:  "stdio",
 		Command:    "github-mcp",
+		WorkDir:    "/mcp/github",
 		AllowTools: []string{"search_repositories"},
 	}
 
@@ -26,6 +27,7 @@ func TestServerConfigMissingAllowToolsAllowsNoTools(t *testing.T) {
 		Name:      "github",
 		Transport: "stdio",
 		Command:   "github-mcp",
+		WorkDir:   "/mcp/github",
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -41,6 +43,7 @@ func TestServerConfigValidateRejectsDenyTools(t *testing.T) {
 		Name:       "github",
 		Transport:  "stdio",
 		Command:    "github-mcp",
+		WorkDir:    "/mcp/github",
 		AllowTools: []string{"search_repositories"},
 		DenyTools:  []string{"delete_repository"},
 	}
@@ -63,6 +66,46 @@ func TestServerConfigAllowedTool(t *testing.T) {
 	}
 }
 
+func TestServerConfigSandboxWorkDirDefaultsFromName(t *testing.T) {
+	cfg := ServerConfig{Name: "nerdoracle", Transport: "stdio", Command: "npx"}
+
+	if got := cfg.SandboxWorkDir(); got != "/mcp/nerdoracle" {
+		t.Fatalf("SandboxWorkDir = %q, want /mcp/nerdoracle", got)
+	}
+}
+
+func TestServerConfigValidateRejectsHostWorkDir(t *testing.T) {
+	cfg := ServerConfig{
+		Name:      "nerdoracle",
+		Transport: "stdio",
+		Command:   "npx",
+		WorkDir:   "/Users/cvalderruten/NerdWallet/nerdoracle",
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected host workdir to be rejected")
+	}
+}
+
+func TestDiscoveredServerStatusIncludesStdioRuntimeNotes(t *testing.T) {
+	status := DiscoveredServer{
+		Server: ServerConfig{
+			Name:      "playwright",
+			Transport: "stdio",
+			Command:   "npx",
+		},
+	}.Status()
+
+	joined := strings.Join(status.RuntimeNotes, "\n")
+	for _, want := range []string{
+		"/mcp/playwright",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("RuntimeNotes missing %q in %#v", want, status.RuntimeNotes)
+		}
+	}
+}
+
 func TestLoadConfigParsesAndValidatesServers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	contents := `{
@@ -71,6 +114,7 @@ func TestLoadConfigParsesAndValidatesServers(t *testing.T) {
 				"name": "github",
 				"transport": "stdio",
 				"command": "github-mcp",
+				"workdir": "/mcp/github",
 				"allow_tools": ["search_repositories"]
 			}
 		]
@@ -146,6 +190,7 @@ func TestLoadConfigAcceptsEnvironmentAlias(t *testing.T) {
 				"name": "nerdoracle",
 				"transport": "stdio",
 				"command": "npx",
+				"workdir": "/mcp/nerdoracle",
 				"environment": {"NERDORACLE_API_URL": "https://example.invalid"}
 			}
 		]
@@ -171,6 +216,7 @@ func TestLoadConfigRejectsInvalidServer(t *testing.T) {
 				"name": "github",
 				"transport": "stdio",
 				"command": "github-mcp",
+				"workdir": "/mcp/github",
 				"allow_tools": ["search_repositories"],
 				"deny_tools": ["delete_repository"]
 			}
@@ -206,6 +252,7 @@ func TestSaveConfigWritesJSON(t *testing.T) {
 				Name:       "github",
 				Transport:  "stdio",
 				Command:    "github-mcp",
+				WorkDir:    "/mcp/github",
 				AllowTools: []string{"search_repositories"},
 			},
 		},

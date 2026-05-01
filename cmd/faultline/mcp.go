@@ -2,15 +2,28 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/matjam/faultline/internal/adapters/mcp"
+	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
 	"github.com/matjam/faultline/internal/config"
 )
 
-func setupMCP(ctx context.Context, cfg config.MCPConfig, logger *slog.Logger) (mcp.Caller, []mcp.DiscoveredServer, error) {
+type sandboxMCPStdioRunner struct {
+	sandbox *docker.Sandbox
+}
+
+func (r sandboxMCPStdioRunner) Start(ctx context.Context, cmd mcp.StdioCommand) (mcp.StdioProcess, error) {
+	if r.sandbox == nil {
+		return nil, fmt.Errorf("sandbox is required for stdio MCP servers")
+	}
+	return r.sandbox.StartStdio(ctx, cmd.Name, cmd.Command, cmd.Args, cmd.WorkDir, cmd.Env)
+}
+
+func setupMCP(ctx context.Context, cfg config.MCPConfig, stdioRunner mcp.StdioRunner, logger *slog.Logger) (mcp.Caller, []mcp.DiscoveredServer, error) {
 	if !cfg.Enabled {
 		return nil, nil, nil
 	}
@@ -45,7 +58,7 @@ func setupMCP(ctx context.Context, cfg config.MCPConfig, logger *slog.Logger) (m
 		discovered = append(discovered, entry)
 	}
 
-	stdioClient := mcp.NewStdioClient(stdioServers)
+	stdioClient := mcp.NewStdioClient(stdioServers, stdioRunner, cfg.StdioIdleTimeout.Duration())
 	for _, server := range stdioServers {
 		router.Add(server.Name, stdioClient)
 		entry, err := stdioClient.Discover(ctx, server.Name)

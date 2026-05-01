@@ -216,7 +216,7 @@ func main() {
 		email = &cfg.Email
 	}
 
-	mcpCaller, mcpDiscovered, err := setupMCP(ctx, cfg.MCP, logger)
+	mcpCaller, mcpDiscovered, err := setupMCP(ctx, cfg.MCP, sandboxMCPStdioRunner{sandbox: sb}, logger)
 	if err != nil {
 		logger.Error("init mcp", "error", err)
 		os.Exit(1)
@@ -340,7 +340,7 @@ func main() {
 		MCPConfigEditEnabled: cfg.MCP.Enabled && cfg.MCP.AllowAgentEditConfig,
 		MCPApprovals:         mcpApprovals,
 		MCPReload: func(ctx context.Context) (mcp.Caller, []mcp.DiscoveredServer, error) {
-			return setupMCP(ctx, cfg.MCP, logger)
+			return setupMCP(ctx, cfg.MCP, sandboxMCPStdioRunner{sandbox: sb}, logger)
 		},
 		Logger:          logger,
 		WebCache:        webCache,

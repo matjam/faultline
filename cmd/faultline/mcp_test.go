@@ -4,18 +4,21 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/matjam/faultline/internal/adapters/mcp"
 	"github.com/matjam/faultline/internal/config"
 )
 
 func TestSetupMCPDisabled(t *testing.T) {
-	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -47,7 +50,7 @@ func TestSetupMCPDiscoversStdioServers(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, hostTestMCPStdioStarter{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -95,18 +98,114 @@ func TestSetupMCPStdioHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestSetupMCPReportsStdioDiscoveryErrorWithoutSandbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(`{
+		"servers": [
+			{
+				"name": "local",
+				"transport": "stdio",
+				"command": "local-mcp"
+			}
+		]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
+		Enabled:    true,
+		ConfigFile: path,
+	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("setupMCP: %v", err)
+	}
+	if caller == nil {
+		t.Fatal("expected caller when MCP enabled")
+	}
+	if len(discovered) != 1 {
+		t.Fatalf("len(discovered) = %d, want 1", len(discovered))
+	}
+	if discovered[0].DiscoveryError == "" {
+		t.Fatal("expected missing sandbox to be reported as discovery error")
+	}
+}
+
+type hostTestMCPStdioStarter struct{}
+
+func (hostTestMCPStdioStarter) Start(ctx context.Context, command mcp.StdioCommand) (mcp.StdioProcess, error) {
+	cmd := exec.CommandContext(ctx, command.Command, command.Args...)
+	cmd.Env = append(os.Environ(), testEnvList(command.Env)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &hostTestMCPStdioProcess{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+	}, nil
+}
+
+type hostTestMCPStdioProcess struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.Reader
+	stderr io.Reader
+}
+
+func (p *hostTestMCPStdioProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *hostTestMCPStdioProcess) Stdout() io.Reader     { return p.stdout }
+func (p *hostTestMCPStdioProcess) Stderr() io.Reader     { return p.stderr }
+func (p *hostTestMCPStdioProcess) Wait() error           { return p.cmd.Wait() }
+
+func testEnvList(values map[string]string) []string {
+	env := make([]string, 0, len(values))
+	for key, value := range values {
+		env = append(env, key+"="+value)
+	}
+	return env
+}
+
 func TestSetupMCPDiscoversHTTPServers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{
-			"jsonrpc": "2.0",
-			"id": 1,
-			"result": {
-				"tools": [
-					{"name": "search_repositories", "description": "Search repositories."},
-					{"name": "delete_repository", "description": "Delete a repository."}
-				]
-			}
-		}`))
+		var req struct {
+			ID     int    `json:"id,omitempty"`
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 2,
+				"result": {
+					"tools": [
+						{"name": "search_repositories", "description": "Search repositories."},
+						{"name": "delete_repository", "description": "Delete a repository."}
+					]
+				}
+			}`))
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
 	}))
 	defer server.Close()
 
@@ -127,7 +226,7 @@ func TestSetupMCPDiscoversHTTPServers(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -167,7 +266,7 @@ func TestSetupMCPKeepsServerWhenDiscoveryFails(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}

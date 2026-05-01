@@ -69,6 +69,7 @@ jobs:
         with:
           context: docker/sandbox
           file: docker/sandbox/Dockerfile
+          platforms: linux/amd64,linux/arm64
           # PRs from forks build but cannot push (no creds). PRs from the
           # same repo and pushes to main/tags push.
           push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
