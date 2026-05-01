@@ -158,7 +158,8 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
 `tools.Executor` and all tool handlers. The largest package by line count.
 
 - **`executor.go`**: `Executor` struct, `New()` constructor, `ToolDefs()` (tool registry advertised to the LLM), `Execute()` central dispatch, web fetching with custom HTML-to-markdown converter (~400 lines), `webCache` with TTL eviction, all `memory_*` / `sandbox_*` / utility (`get_time`, `sleep`, `send_message`, `context_status`) handlers.
-- **`vector.go`**: `Embedder` interface (consumer-side; defined here rather than in `agent/ports.go` because the agent loop never embeds), per-mutation reindex helpers (`reindexVector`, `removeVector`, `removeVectorPrefix`, `renameVector`, `reindexVectorDir`), path-exclusion logic (skip `prompts/` and `.trash/`), `truncateForEmbedding` cap, dual-mode `memory_search` description selector. The mutation hooks called from `executor.go` are no-ops when the feature is disabled, so the dispatcher code is identical regardless of operator config.
+- **`chunk.go`**: paragraph-aware splitter (`splitIntoUnits`), unit-key encoding helpers (`unitKey`, `pathFromUnitKey`, `chunkIdxFromUnitKey`). `maxParagraphBytes = 3000` is the only fallback cap — applied only when a single paragraph exceeds it, in which case it's byte-cut into sequential pieces.
+- **`vector.go`**: `Embedder` interface (consumer-side; defined here rather than in `agent/ports.go` because the agent loop never embeds), per-mutation paragraph-aware reindex helpers (`reindexVector`, `removeVector`, `removeVectorPrefix`, `renameVector`, `reindexVectorDir`), path-exclusion logic (skip `prompts/` and `.trash/`), the adaptive batcher `embedWithAdaptiveBatching` (halves batch size on failure, grows back after 5 success streak, skips single-input failures), `fileLevelHits` for collapsing chunk-level search hits to one-per-file, dual-mode `memory_search` description selector, and the bulk reconcile/rebuild entry points (`ReconcileVectorIndex`, `RebuildVectorIndex`) used by both the startup reconcile in `cmd/faultline/embeddings.go` and the `rebuild_indexes` tool. The mutation hooks called from `executor.go` are no-ops when the feature is disabled, so the dispatcher code is identical regardless of operator config.
 - **`wiki.go`**: `wiki_fetch` tool (MediaWiki API + plain-text extraction + cache).
 - **`html_test.go`**: HTML-to-markdown conversion tests.
 
@@ -178,11 +179,12 @@ Lifecycle:
 
 ### internal/search/vector/
 
-Pure-Go in-memory vector index keyed by string paths. `vector.Index` provides `Upsert`, `Remove`, `RemovePrefix`, `Rename`, `Search`, plus `Save`/`Load` against a custom binary format ("FVEC v1") so embeddings persist across restarts.
+Pure-Go in-memory vector index keyed by string paths. `vector.Index` provides `Upsert`, `Remove`, `RemovePrefix`, `Rename`, `Search`, plus chunk-aware variants `RemoveChunks` / `RenameChunks` / `HasChunks` for paragraph-keyed entries (`path#N`) and `Save`/`Load` against a custom binary format ("FVEC v1") so embeddings persist across restarts.
 
 - Brute-force cosine similarity over a `map[string][]float32`. At Faultline's scale (low-thousands of files, 1536-dim vectors) flat scan is sub-millisecond; HNSW/IVF was ruled out as overkill.
 - Vectors are L2-normalised on Upsert so Search can use plain dot products.
-- Binary format: `magic[4]="FVEC" | version[4] | dim[4] | count[4] | model_len[2] | model[N] | records[count]{path_len[2], path[N], vec[dim*4]}`. Deterministic ordering (paths sorted on save) for byte-stable diffs in tests.
+- Keys are strings: bare `path` for single-paragraph files, `path#N` for chunked. The `#`-separator is unambiguous because the memory path validator restricts segments to `[a-z0-9.-]`. Dedup of paragraph-level results down to file level happens in the tools layer (`fileLevelHits`), not in the index.
+- Binary format: `magic[4]="FVEC" | version[4] | dim[4] | count[4] | model_len[2] | model[N] | records[count]{path_len[2], path[N], vec[dim*4]}`. Deterministic ordering (keys sorted on save) for byte-stable diffs in tests.
 - `ErrModelMismatch` returned by `Load` when the on-disk dim or model differs from what the in-memory index was constructed for; caller is expected to `Reset` and re-embed.
 - `ErrCorrupt` returned for unreadable / wrong-magic / inconsistent files; caller is expected to rename the file aside (mirroring the `state/jsonfile` pattern) and continue with an empty index.
 - `Dirty()` is an atomic the persistence loop polls; cleared by `Save`.

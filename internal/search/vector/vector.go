@@ -94,6 +94,31 @@ func (idx *Index) Has(path string) bool {
 	return ok
 }
 
+// HasChunks reports whether path is represented in the index by
+// either a bare-path entry or any "path#N" chunk entry. Used by the
+// startup reconcile pass to decide whether a file already has at
+// least one embedding (in which case it's left alone) versus needing
+// a fresh paragraph-aware indexing pass.
+//
+// O(n) in the index size; fine for the few-times-a-startup cadence
+// the reconcile pass runs at.
+func (idx *Index) HasChunks(path string) bool {
+	prefix := path + "#"
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	if _, ok := idx.vectors[path]; ok {
+		return true
+	}
+	for k := range idx.vectors {
+		if hasPathChunkPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Paths returns a snapshot of all indexed paths in unspecified order.
 // Useful for the startup reconcile pass that detects which memory
 // files lack a vector.
@@ -180,8 +205,9 @@ func (idx *Index) RemovePrefix(prefix string) int {
 // oldPath is not indexed this is a no-op. If newPath already exists it
 // is overwritten. Returns true if a vector was actually renamed.
 //
-// Useful for memory_move: the file content is unchanged so the
-// embedding is unchanged; we just swap the key.
+// Useful for memory_move on a file with one embedding unit: the file
+// content is unchanged so the embedding is unchanged; we just swap
+// the key. For files with multiple chunked units, use RenameChunks.
 func (idx *Index) Rename(oldPath, newPath string) bool {
 	if oldPath == newPath {
 		return false
@@ -195,6 +221,101 @@ func (idx *Index) Rename(oldPath, newPath string) bool {
 	delete(idx.vectors, oldPath)
 	idx.vectors[newPath] = v
 	idx.dirty.Store(true)
+	return true
+}
+
+// RemoveChunks removes the bare path key plus every "path#N" key
+// belonging to the same memory file. Returns the number of vectors
+// removed. Used as the cleanup step before re-upserting a file's
+// units (so a file that shrank from 5 chunks to 2 doesn't leave 3
+// stale entries) and on memory_delete.
+//
+// Matching rule: a key K belongs to path P iff K == P or K starts
+// with P + "#" followed by an all-digit suffix. The all-digit check
+// avoids accidentally matching unrelated keys that happen to start
+// with the same prefix (e.g. "foo" vs "foobar").
+func (idx *Index) RemoveChunks(path string) int {
+	prefix := path + "#"
+
+	idx.mu.Lock()
+	n := 0
+	for k := range idx.vectors {
+		if k == path {
+			delete(idx.vectors, k)
+			n++
+			continue
+		}
+		if !hasPathChunkPrefix(k, prefix) {
+			continue
+		}
+		delete(idx.vectors, k)
+		n++
+	}
+	idx.mu.Unlock()
+	if n > 0 {
+		idx.dirty.Store(true)
+	}
+	return n
+}
+
+// RenameChunks moves every vector keyed at oldPath or oldPath#N over
+// to newPath or newPath#N respectively. Returns the count of vectors
+// moved.
+//
+// Used by memory_move on a multi-chunk file: file content is unchanged
+// so embeddings are unchanged; we just swap the key prefix. For a
+// single-chunk file this is equivalent to Rename.
+func (idx *Index) RenameChunks(oldPath, newPath string) int {
+	if oldPath == newPath {
+		return 0
+	}
+	oldPrefix := oldPath + "#"
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	type pair struct {
+		oldKey, newKey string
+		vec            []float32
+	}
+	var moves []pair
+
+	for k, v := range idx.vectors {
+		switch {
+		case k == oldPath:
+			moves = append(moves, pair{oldKey: k, newKey: newPath, vec: v})
+		case hasPathChunkPrefix(k, oldPrefix):
+			suffix := k[len(oldPath):] // includes the leading '#'
+			moves = append(moves, pair{oldKey: k, newKey: newPath + suffix, vec: v})
+		}
+	}
+
+	for _, m := range moves {
+		delete(idx.vectors, m.oldKey)
+		idx.vectors[m.newKey] = m.vec
+	}
+	if len(moves) > 0 {
+		idx.dirty.Store(true)
+	}
+	return len(moves)
+}
+
+// hasPathChunkPrefix reports whether k begins with prefix (which must
+// end in "#") and the remainder is one or more digits with nothing
+// after them. This is the sole criterion used to identify a chunk key
+// as belonging to a particular memory path.
+func hasPathChunkPrefix(k, prefix string) bool {
+	if len(k) <= len(prefix) {
+		return false
+	}
+	if k[:len(prefix)] != prefix {
+		return false
+	}
+	for i := len(prefix); i < len(k); i++ {
+		if k[i] < '0' || k[i] > '9' {
+			return false
+		}
+	}
 	return true
 }
 

@@ -140,6 +140,64 @@ func TestRemovePrefix(t *testing.T) {
 	}
 }
 
+func TestRemoveChunks(t *testing.T) {
+	idx := New(2, "m")
+	_ = idx.Upsert("a/foo.md", []float32{1, 0})
+	_ = idx.Upsert("a/foo.md#0", []float32{0, 1})
+	_ = idx.Upsert("a/foo.md#1", []float32{1, 1})
+	_ = idx.Upsert("a/foo.md#22", []float32{1, -1}) // multi-digit suffix
+	_ = idx.Upsert("a/foobar.md", []float32{0, 1})  // sibling, must NOT match
+	_ = idx.Upsert("a/foo.md#abc", []float32{1, 0}) // non-digit suffix, NOT a chunk
+	_ = idx.Upsert("a/other.md", []float32{1, 0})
+
+	n := idx.RemoveChunks("a/foo.md")
+	if n != 4 {
+		t.Errorf("expected 4 removals (bare + 3 numeric chunks), got %d", n)
+	}
+	if !idx.Has("a/foobar.md") {
+		t.Error("'a/foobar.md' should not be removed by RemoveChunks(\"a/foo.md\")")
+	}
+	if !idx.Has("a/foo.md#abc") {
+		t.Error("non-digit suffix should not be treated as a chunk")
+	}
+	if !idx.Has("a/other.md") {
+		t.Error("'a/other.md' should not be removed")
+	}
+	if idx.Has("a/foo.md") || idx.Has("a/foo.md#0") || idx.Has("a/foo.md#1") || idx.Has("a/foo.md#22") {
+		t.Error("matched keys should all be gone")
+	}
+}
+
+func TestRenameChunks(t *testing.T) {
+	idx := New(2, "m")
+	_ = idx.Upsert("old.md", []float32{1, 0})
+	_ = idx.Upsert("old.md#0", []float32{0, 1})
+	_ = idx.Upsert("old.md#1", []float32{1, 1})
+	_ = idx.Upsert("oldfoo.md", []float32{0, 1}) // sibling, must NOT move
+	_ = idx.Upsert("other.md", []float32{1, 0})
+
+	n := idx.RenameChunks("old.md", "new.md")
+	if n != 3 {
+		t.Errorf("expected 3 renames, got %d", n)
+	}
+	for _, want := range []string{"new.md", "new.md#0", "new.md#1"} {
+		if !idx.Has(want) {
+			t.Errorf("missing %q after rename", want)
+		}
+	}
+	for _, gone := range []string{"old.md", "old.md#0", "old.md#1"} {
+		if idx.Has(gone) {
+			t.Errorf("%q should be gone after rename", gone)
+		}
+	}
+	if !idx.Has("oldfoo.md") {
+		t.Error("'oldfoo.md' (sibling) should not move")
+	}
+	if !idx.Has("other.md") {
+		t.Error("'other.md' should not move")
+	}
+}
+
 func TestRename(t *testing.T) {
 	idx := New(2, "m")
 	_ = idx.Upsert("old", []float32{1, 0})

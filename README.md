@@ -116,11 +116,15 @@ An in-memory BM25 search index is built from all memory files on startup and reb
 
 ### Semantic Search (optional)
 
-When `[embeddings]` is configured with an OpenAI-compatible endpoint and model, Faultline also embeds every memory file (excluding `prompts/` and `.trash/`) into an in-memory vector index, persisted to `<memory>/.vector/index.bin` in a custom binary format so embeddings aren't recomputed on restart. Memory mutations (write/edit/append/insert/restore) trigger a synchronous re-embed of the affected file. Failures are logged but never block the write — the vector index is best-effort enrichment, not source of truth.
+When `[embeddings]` is configured with an OpenAI-compatible endpoint and model, Faultline embeds every memory file (excluding `prompts/` and `.trash/`) into an in-memory vector index, persisted to `<memory>/.vector/index.bin` in a custom binary format so embeddings aren't recomputed on restart.
 
-The `memory_search` tool then returns BOTH lexical (BM25) and semantic results in clearly labeled sections per query, so the LLM can pick whichever is more relevant. When embeddings are disabled, `memory_search` falls back to the original BM25-only output. The default model is `text-embedding-3-small` (1536 dim, ~$0.02/1M tokens — indexing 10k typical memory files is ~$0.10 one-time).
+**Paragraph-aligned chunking.** Files are split on blank lines and each paragraph is embedded as its own unit (keyed `path#0`, `path#1`, ...). Single-paragraph files keep the legacy bare-`path` shape. The only safety cap is a per-paragraph byte limit (3000 bytes) that triggers a byte-cut for the rare giant paragraph (one-line file, an unbroken code block, etc.) — paragraph boundaries are otherwise honoured exactly as the operator wrote them, so search snippets are semantically clean sections rather than arbitrary chunks.
 
-If you change the embedding model, the on-disk index records the prior model name and is automatically discarded and rebuilt on next startup.
+**Adaptive batching.** The embedder calls the API in batches sized by `[embeddings].batch_size`. On batch failure (e.g. a server with a tighter physical batch limit, an oversized paragraph, transient errors) the batch size halves and retries; after 5 consecutive successful batches it doubles back toward the configured ceiling. A failure that persists down to batch size 1 means a single paragraph the server can't accept — that paragraph is logged and skipped, and the rest of the indexing pass continues. Skipped paragraphs don't appear in semantic search but BM25 still finds the parent file.
+
+**Dual-section search.** `memory_search` returns BOTH lexical (BM25) and semantic results in clearly labeled sections per query. Semantic results are deduped to one entry per file (best-scoring paragraph wins) and the snippet shown is the matched paragraph itself, not the whole file — so the LLM gets the relevant section directly. When embeddings are disabled, `memory_search` falls back to BM25-only output.
+
+**Defaults and cost.** Default model is `text-embedding-3-small` (1536 dim, ~$0.02/1M tokens — indexing 10k typical memory files is ~$0.10 one-time). Works with OpenAI, Ollama, LM Studio, vLLM, llama.cpp's embedding server, anything speaking the same wire shape. If you change the embedding model, the on-disk index records the prior model name and is automatically discarded and rebuilt on next startup.
 
 ### Web Browsing
 

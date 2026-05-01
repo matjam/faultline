@@ -1384,6 +1384,14 @@ const memorySearchResultLimit = 5
 // scores in roughly [0.1, 0.9] for in-domain queries.
 const memorySearchSemanticMinScore = 0.30
 
+// memorySearchOversample is the multiplier applied to the result
+// limit when querying the (paragraph-keyed) vector index, so the
+// file-level dedup pass has enough chunk hits to surface
+// memorySearchResultLimit distinct files. With limit=5 and
+// oversample=10 we ask the index for 50 chunk hits and dedupe down
+// to the top 5 distinct files.
+const memorySearchOversample = 10
+
 func (te *Executor) memorySearch(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Query          string `json:"query"`
@@ -1439,6 +1447,12 @@ func (te *Executor) memorySearch(ctx context.Context, argsJSON string) string {
 
 	// Semantic pass — only if embeddings are configured. Errors here
 	// are logged and swallowed; the lexical results still go out.
+	//
+	// The vector index is keyed at paragraph granularity (path or
+	// path#N). We oversample by a factor of memorySearchOversample so
+	// the file-level dedup pass below has enough material to choose
+	// from, then collapse to one entry per file keeping each file's
+	// best-scoring chunk.
 	var semantic []vector.Result
 	if te.vectorEnabled() {
 		qvec, err := te.embedQuery(ctx, args.Query)
@@ -1446,12 +1460,23 @@ func (te *Executor) memorySearch(ctx context.Context, argsJSON string) string {
 			te.logger.Warn("memory_search: embed query failed; lexical only",
 				slog.String("err", err.Error()))
 		} else {
-			res, sErr := te.vIndex.Search(qvec, memorySearchResultLimit, memorySearchSemanticMinScore, filter)
+			// The filter sees raw index keys (which may carry a #N
+			// suffix). Strip it so the date filter sees the file
+			// path it expects.
+			vectorFilter := filter
+			if vectorFilter != nil {
+				orig := filter
+				vectorFilter = func(key string) bool {
+					return orig(pathFromUnitKey(key))
+				}
+			}
+			oversample := memorySearchResultLimit * memorySearchOversample
+			res, sErr := te.vIndex.Search(qvec, oversample, memorySearchSemanticMinScore, vectorFilter)
 			if sErr != nil {
 				te.logger.Warn("memory_search: vector search failed; lexical only",
 					slog.String("err", sErr.Error()))
 			} else {
-				semantic = res
+				semantic = fileLevelHits(res, memorySearchResultLimit)
 			}
 		}
 	}
@@ -1494,24 +1519,43 @@ func (te *Executor) memorySearch(ctx context.Context, argsJSON string) string {
 			sb.WriteString("(no matches above similarity threshold)\n")
 		}
 		for i, r := range semantic {
-			// Read the file content for the preview. The vector index
-			// only stores the path + vector, so we go back to disk.
-			// In practice the file is small and this is fast.
-			content, err := te.memory.Read(r.Path)
+			// r.Path is the unit key, possibly with a #N suffix.
+			// Recover the file path for display + memory_read hint
+			// and the chunk index for snippet extraction.
+			filePath := pathFromUnitKey(r.Path)
+			chunkIdx := chunkIdxFromUnitKey(r.Path)
+
+			content, err := te.memory.Read(filePath)
 			if err != nil {
 				fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n[file unreadable: %s]\n\n",
-					i+1, r.Path, r.Score, err)
+					i+1, filePath, r.Score, err)
 				continue
 			}
-			total := len(content)
+
+			// Snippet: the matched paragraph if the file was chunked
+			// and the chunk index is still valid, otherwise the file
+			// content. Files re-split here on each search hit; cheap
+			// for typical sizes and avoids storing snippet text in
+			// the vector index.
+			snippet := content
+			label := filePath
+			if chunkIdx >= 0 {
+				units := splitIntoUnits(content)
+				if chunkIdx < len(units) {
+					snippet = units[chunkIdx]
+					label = fmt.Sprintf("%s [paragraph %d/%d]", filePath, chunkIdx+1, len(units))
+				}
+			}
+
+			total := len(snippet)
 			var tail string
 			if limit > 0 && total > limit {
-				content = content[:limit]
-				tail = fmt.Sprintf("\n[truncated: showing first %d of %d chars; call memory_read with path=%q to read the full file, or with offset=%d to continue from where this preview ends]",
-					limit, total, r.Path, lineCount(content)+1)
+				snippet = snippet[:limit]
+				tail = fmt.Sprintf("\n[truncated: showing first %d of %d chars; call memory_read with path=%q to read the full file]",
+					limit, total, filePath)
 			}
 			fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s%s\n\n",
-				i+1, r.Path, r.Score, content, tail)
+				i+1, label, r.Score, snippet, tail)
 		}
 	}
 
