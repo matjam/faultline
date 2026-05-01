@@ -1,4 +1,4 @@
-[Time: {{TIME}}]
+[Time: {{TIME}} — this is the current time. Any "Current Time" in your system prompt is from when the context was last built and is stale; ignore it and use this timestamp instead.]
 
 No new external input — your loop is still running. This is not an idle ping; it is your turn to act. Pick up where you left off, or do something new.
 

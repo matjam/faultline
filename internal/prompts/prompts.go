@@ -24,7 +24,7 @@ var (
 	//go:embed templates/compaction.md
 	defaultCompaction string
 
-	//go:embed templates/cycle_start.md
+	//go:embed templates/cycle-start.md
 	defaultCycleStart string
 
 	//go:embed templates/continue.md
@@ -39,6 +39,52 @@ var (
 type Store interface {
 	Read(path string) (string, error)
 	Write(path, content string) error
+}
+
+// Migrator extends Store with the file operations needed to apply
+// one-time prompt-file renames at startup. *fs.Store satisfies it.
+type Migrator interface {
+	Store
+	Move(src, dst string) error
+}
+
+// legacyRenames lists prompt files that have been renamed in the codebase
+// and need a one-time migration on existing stores. Each pair maps the
+// old path (deprecated) to the new path (current). Migrate processes
+// these every startup; it is a no-op once migration has run.
+var legacyRenames = []struct {
+	old string
+	new string
+}{
+	{old: "prompts/cycle_start.md", new: "prompts/cycle-start.md"},
+}
+
+// Migrate applies one-time prompt filename renames. Behavior per pair:
+//
+//   - both old and new exist: returns an error. The operator must
+//     resolve the conflict manually (the agent might have meaningful
+//     content in either file, and silently picking one risks data loss).
+//   - only old exists: renames old -> new.
+//   - only new exists, or neither: no-op.
+//
+// Idempotent and safe to call every startup.
+func Migrate(store Migrator) error {
+	for _, r := range legacyRenames {
+		oldContent, oldErr := store.Read(r.old)
+		_, newErr := store.Read(r.new)
+		oldExists := oldErr == nil && oldContent != ""
+		newExists := newErr == nil
+
+		switch {
+		case oldExists && newExists:
+			return fmt.Errorf("prompt migration conflict: both %q and %q exist; remove one manually before starting", r.old, r.new)
+		case oldExists && !newExists:
+			if err := store.Move(r.old, r.new); err != nil {
+				return fmt.Errorf("migrate %q -> %q: %w", r.old, r.new, err)
+			}
+		}
+	}
+	return nil
 }
 
 // promptFile defines a mutable prompt file with its default seed content.
@@ -61,8 +107,8 @@ func init() {
 			path:         "prompts/compaction.md",
 			defaultValue: defaultCompaction,
 		},
-		"cycle_start": {
-			path:         "prompts/cycle_start.md",
+		"cycle-start": {
+			path:         "prompts/cycle-start.md",
 			defaultValue: defaultCycleStart,
 		},
 		"continue": {

@@ -414,7 +414,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 // loop-detection counters too).
 //
 // When persistence is disabled or no state file exists, a fresh context
-// is built with the standard system prompt + cycle_start user turn.
+// is built with the standard system prompt + cycle-start user turn.
 func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, error) {
 	// Build search index
 	docs, err := a.memory.AllFiles()
@@ -465,12 +465,12 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 		return resumed, prompts, savedIdle, nil
 	}
 
-	// Fresh start: system message + cycle_start user turn.
+	// Fresh start: system message + cycle-start user turn.
 	messages := []llm.Message{
 		systemMsg,
 		{
 			Role:    llm.RoleUser,
-			Content: prompt.Render(prompts["cycle_start"], now),
+			Content: prompt.Render(prompts["cycle-start"], now),
 		},
 	}
 
