@@ -1,0 +1,128 @@
+name: Sandbox image
+
+# Builds and publishes the Faultline agent sandbox image to GHCR.
+#
+# Triggers:
+#   - Pushes to main that touch the Dockerfile, README, or this workflow:
+#     publish :latest plus :sha-<short>.
+#   - Pull requests touching the same paths: build only, no push, so we
+#     fail fast on Dockerfile breakage without polluting the registry.
+#   - Tag pushes matching v*: publish :vX.Y.Z and :vX.Y. Driven by the
+#     same release-please flow that publishes the binary.
+#   - Manual dispatch: useful while iterating.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "docker/sandbox/**"
+      - ".github/workflows/sandbox-image.yml"
+  pull_request:
+    paths:
+      - "docker/sandbox/**"
+      - ".github/workflows/sandbox-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Skip login on pull_request from forks -- they have no access to
+        # GITHUB_TOKEN with packages:write anyway, and we won't push.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/matjam/faultline-sandbox
+          tags: |
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/sandbox
+          file: docker/sandbox/Dockerfile
+          # PRs from forks build but cannot push (no creds). PRs from the
+          # same repo and pushes to main/tags push.
+          push: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke-test:
+    name: Smoke test
+    needs: build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build local image for smoke test
+        # Build with the same context but local-only; faster than pulling
+        # the just-pushed image for verification.
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/sandbox
+          file: docker/sandbox/Dockerfile
+          load: true
+          tags: faultline-sandbox:smoke-test
+          cache-from: type=gha
+
+      - name: Verify runtimes are present
+        run: |
+          docker run --rm faultline-sandbox:smoke-test bash -c '
+            set -euo pipefail
+            uv --version
+            uvx --version
+            python --version
+            pip --version
+            node --version
+            npm --version
+            bun --version
+            deno --version
+            go version
+            curl --version | head -1
+            jq --version
+            rg --version | head -1
+          '
+
+      - name: Verify --user UID:GID works
+        # The sandbox always runs with --user <host_uid>:<host_gid>; this
+        # confirms the image doesn't accidentally require root and that
+        # uv can run as an arbitrary uid.
+        run: |
+          docker run --rm --user 1000:1000 faultline-sandbox:smoke-test bash -c '
+            set -euo pipefail
+            id
+            uv --version
+            python --version
+          '

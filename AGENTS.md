@@ -39,7 +39,9 @@ faultline/
       embeddings/openai/      OpenAI-compatible /v1/embeddings client
       memory/fs/              filesystem-backed Memory adapter
       operator/telegram/      Telegram bot for collaborator messaging
-      sandbox/docker/         Docker-based Python sandbox
+      sandbox/docker/         Docker-based multi-runtime sandbox
+                              (image: docker/sandbox/Dockerfile, Arch-based,
+                              ships uv/python/node/bun/deno/go + CLI tools)
       email/imap/             IMAP email client
       state/jsonfile/         JSON-file conversation persistence (Save/Load
                               + Persister wrapper that satisfies StateStore)
@@ -247,13 +249,14 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 
 ### internal/adapters/sandbox/docker/
 
-`docker.Sandbox` for Docker-backed Python execution.
+`docker.Sandbox` for Docker-backed script execution. The default image (`ghcr.io/matjam/faultline-sandbox`, built from `docker/sandbox/Dockerfile`) is a multi-runtime Arch-based image with Python+pip, uv+uvx, Node+npm+npx, Bun, Deno, Go, and common CLI tools (curl, jq, ripgrep, fd, git, ...). Any image with `sh` and `uv` on PATH satisfies the adapter's contract; the image is configurable per deployment.
 
 - Flat directory layout: `scripts/`, `input/`, `output/` plus a seeded `pyproject.toml`.
-- Ephemeral containers per operation (`docker run --rm`). Host UID/GID mapping for file ownership.
+- Ephemeral containers per operation (`docker run --rm`). Host UID/GID mapping for file ownership; image must run as an arbitrary unprivileged UID.
 - Filenames validated against a strict regex (`^[a-z0-9][a-z0-9._-]*$`).
 - Network access toggleable; memory limits enforced.
-- `uv` for fast Python package management. Install/upgrade/remove tracked in `pyproject.toml`.
+- `sandbox_execute` drives Python via `uv` (`uv sync && uv run python /scripts/X`); `sandbox_shell` runs arbitrary `sh -c` commands so the agent can drive any other runtime on PATH directly.
+- Install/upgrade/remove tracked in `pyproject.toml` for the Python project; non-Python languages live entirely inside the container at runtime.
 - Execution log written to `sandbox-YYYY-MM-DD.log` (separate from the main slog stream).
 
 ### internal/adapters/email/imap/

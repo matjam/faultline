@@ -277,8 +277,15 @@ func Default() *Config {
 			Dir:   "./logs",
 		},
 		Sandbox: SandboxConfig{
-			Enabled:     false,
-			Image:       "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
+			Enabled: false,
+			// Faultline's own multi-runtime sandbox image (Arch-based;
+			// ships uv/uvx, python+pip, node+npm+npx, bun, deno, go,
+			// plus common LLM-friendly CLI tools). Built from
+			// docker/sandbox/Dockerfile and published by the
+			// sandbox-image GH Actions workflow. Pin to a versioned
+			// tag in your config.toml if you want a specific image
+			// version locked down.
+			Image:       "ghcr.io/matjam/faultline-sandbox:latest",
 			Dir:         "./sandbox",
 			Timeout:     duration(5 * time.Minute),
 			Network:     false,
