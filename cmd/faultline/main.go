@@ -31,6 +31,7 @@ import (
 	"github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/search/vector"
+	"github.com/matjam/faultline/internal/subagent"
 	"github.com/matjam/faultline/internal/tools"
 	"github.com/matjam/faultline/internal/update"
 	"github.com/matjam/faultline/internal/version"
@@ -264,6 +265,29 @@ func main() {
 	webCache := tools.NewWebCache(60 * time.Second)
 	defer webCache.Close()
 
+	// Subagent manager (optional). Constructed before the primary's
+	// tool executor so the SubagentManager pointer can be wired in;
+	// the spawnFn closure shares the primary's adapters.
+	var subMgr *subagent.Manager
+	if cfg.Subagent.Active() {
+		subMgr = buildSubagentManager(cfg, subagentDeps{
+			Memory:      memory,
+			Index:       index,
+			VectorIndex: vIndex,
+			Telegram:    tg,
+			Sandbox:     sb,
+			Email:       email,
+			Kobold:      kb,
+			Updater:     updater,
+			Embedder:    embedder,
+			Skills:      skillStore,
+			WebCache:    webCache,
+			Logger:      logger,
+		})
+	} else {
+		logger.Info("subagent support disabled, subagent_* tools not advertised")
+	}
+
 	toolExec := tools.New(tools.Deps{
 		Mode:                tools.ModePrimary,
 		Memory:              memory,
@@ -283,6 +307,7 @@ func main() {
 		MaxTokens:           cfg.Agent.MaxTokens,
 		Limits:              cfg.Limits,
 		MaxSleep:            cfg.Agent.MaxSleep.Duration(),
+		SubagentManager:     subMgr,
 	})
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
 	// executor's lifecycle via the Tools port; agent.Close() (deferred
@@ -302,6 +327,15 @@ func main() {
 		skillsPort = skillStore
 	}
 
+	// agent.Subagents port: wire the manager when subagent support is
+	// enabled. Same nil-interface guard as the Skills port -- a typed
+	// nil pointer would create a non-nil interface, defeating the
+	// nil-allowed check inside the agent loop.
+	var subagentsPort agent.Subagents
+	if subMgr != nil {
+		subagentsPort = subMgr
+	}
+
 	a := agent.New(cfg, agent.Deps{
 		Chat:      chat,
 		Memory:    memory,
@@ -311,6 +345,7 @@ func main() {
 		Tools:     toolExec,
 		State:     state,
 		Skills:    skillsPort,
+		Subagents: subagentsPort,
 	}, logger)
 	defer a.Close()
 
