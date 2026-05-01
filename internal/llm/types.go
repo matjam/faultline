@@ -81,10 +81,15 @@ type FunctionDef struct {
 }
 
 // ChatResponse is the trimmed-down /v1/chat/completions response shape we
-// actually consume. The real response carries usage stats, IDs, etc., but
-// we don't use them and decoding ignores unknown fields.
+// actually consume. The real response carries IDs and other metadata we
+// don't use; decoding ignores unknown fields.
 type ChatResponse struct {
 	Choices []Choice `json:"choices"`
+
+	// Usage is populated by OpenAI-compatible servers that report
+	// token accounting. Backends that omit it leave the zero value;
+	// the agent's inspector treats zero as "unknown".
+	Usage Usage `json:"usage"`
 }
 
 // Choice is one generation option in a ChatResponse. We always read the
@@ -92,4 +97,14 @@ type ChatResponse struct {
 type Choice struct {
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
+}
+
+// Usage is the OpenAI-spec token accounting payload. PromptTokens
+// counts the request's prompt; CompletionTokens counts the generated
+// response. TotalTokens is their sum but we don't read it directly —
+// computing it client-side keeps the field semantics auditable.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }

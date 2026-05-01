@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	adminhttp "github.com/matjam/faultline/internal/adapters/admin/http"
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
 	"github.com/matjam/faultline/internal/adapters/llm/openai"
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
@@ -307,6 +308,17 @@ func main() {
 		logger.Info("subagent support disabled, subagent_* tools not advertised")
 	}
 
+	// Admin UI is constructed BEFORE the tool executor when enabled,
+	// because the executor takes the admin's tool ring buffer as its
+	// Observer. Inspectors are attached back to the admin server
+	// after the agent is built (see AttachInspectors below).
+	processStarted := time.Now()
+	adminSrv, err := buildAdmin(ctx, cfg, processStarted, logger)
+	if err != nil {
+		logger.Error("admin UI failed to start", "error", err)
+		os.Exit(1)
+	}
+
 	toolExec := tools.New(tools.Deps{
 		Mode:                tools.ModePrimary,
 		Memory:              memory,
@@ -327,6 +339,7 @@ func main() {
 		Limits:              cfg.Limits,
 		MaxSleep:            cfg.Agent.MaxSleep.Duration(),
 		SubagentManager:     subMgr,
+		Observer:            adminSrv.ToolObserver(),
 	})
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
 	// executor's lifecycle via the Tools port; agent.Close() (deferred
@@ -368,26 +381,17 @@ func main() {
 	}, logger)
 	defer a.Close()
 
-	// --- Admin UI -------------------------------------------------------
-	// Optional embedded HTTP server for operator-facing administration.
-	// Stage 2 surface area: login, logout, dashboard stub. Inspector
-	// ports onto agent state come in later stages.
-	//
-	// The admin server runs under the parent ctx so that BOTH
-	// signals collapse it eventually:
-	//   - first SIGINT closes shutdownCh (agent saves state) but the
-	//     admin server stays up so the operator can watch shutdown
-	//     progress in a future stage;
-	//   - second SIGINT cancels ctx, which triggers admin shutdown.
-	//
-	// On graceful agent exit (first-signal path), we explicitly cancel
-	// ctx after Run returns so the admin server's Run unblocks.
-	adminSrv, err := buildAdmin(ctx, cfg, time.Now(), logger)
-	if err != nil {
-		logger.Error("admin UI failed to start", "error", err)
-		os.Exit(1)
+	// Now that the agent and (optionally) subagent manager exist,
+	// hand them to the admin server as inspector ports. The admin
+	// dashboard's live fragments read from these on every poll.
+	if adminSrv != nil {
+		var subInspector adminhttp.SubagentInspector
+		if subMgr != nil {
+			subInspector = subMgr
+		}
+		adminSrv.AttachInspectors(a, subInspector)
+		adminSrv.Start(ctx)
 	}
-	adminSrv.Start(ctx)
 
 	logger.Info("agent starting",
 		"api_url", cfg.API.URL,
