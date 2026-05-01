@@ -160,9 +160,9 @@ The default contents of these prompts live in `internal/prompts/templates/*.md` 
 
 Bidirectional communication with a human collaborator via Telegram. Incoming messages are surfaced at the next turn boundary -- the in-flight LLM request is never cancelled, so the agent finishes its current thought before responding. If the agent was about to use tools when the message arrived, those calls are deferred and the agent can choose whether to re-issue them after replying. Outgoing messages are converted to Telegram MarkdownV2 with auto-chunking for the 4096-character limit, falling back to plain text on conversion failure.
 
-### Python Sandbox
+### Multi-runtime Sandbox
 
-An optional Docker-based execution environment for Python scripts. Uses [`uv`](https://github.com/astral-sh/uv) for package management. Containers are ephemeral (created per execution, removed after). The sandbox has a flat file structure (`scripts/`, `input/`, `output/`) and supports configurable network access, memory limits, and execution timeouts.
+An optional Docker-based execution environment. The default image (`ghcr.io/matjam/faultline-sandbox`, built from `docker/sandbox/Dockerfile`) is Arch-based and ships Python+pip, [`uv`](https://github.com/astral-sh/uv) + `uvx`, Node.js + npm + npx, [Bun](https://bun.sh), [Deno](https://deno.com), Go, plus common CLI tools (curl, jq, ripgrep, fd, git, ...). `sandbox_execute` runs Python scripts via `uv`; `sandbox_shell` gives the agent arbitrary shell access to any runtime on PATH. Containers are ephemeral (created per execution, removed after); the sandbox has a flat file structure (`scripts/`, `input/`, `output/`) and supports configurable network access, memory limits, and execution timeouts. Configure a different image in `config.toml` if you need something else.
 
 ### IMAP Email (optional)
 
