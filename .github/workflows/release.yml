@@ -1,13 +1,29 @@
 name: Release
 
-# Triggered by tag pushes (vX.Y.Z), which release-please creates when
-# its release PR is merged. Builds binaries and attaches them to the
-# GitHub release that release-please already created.
+# Builds binaries for a tag and attaches them to the matching GitHub
+# release. Two ways this gets triggered:
+#
+#   1. Automatically on tag push (vX.Y.Z) -- the normal path.
+#      release-please.yml uses RELEASE_PLEASE_TOKEN (a fine-grained PAT)
+#      to push tags so this workflow fires on tag-push events.
+#
+#   2. Manually via workflow_dispatch -- the backup path. Pick the tag
+#      from the input field when running the workflow. Useful for
+#      retrying a failed release build, or backfilling a tag whose
+#      auto-trigger was suppressed (e.g. before the PAT was configured,
+#      tags pushed via the default GITHUB_TOKEN didn't trigger the
+#      workflow).
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0). Must already exist."
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,6 +36,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # On workflow_dispatch we check out the tag the operator
+          # supplied; on tag-push the default ref already points at
+          # the tag.
+          ref: ${{ inputs.tag || github.ref }}
           # goreleaser needs the full history to compute changelog
           # diffs and previous-tag info, even though release-please
           # owns the actual changelog body.
