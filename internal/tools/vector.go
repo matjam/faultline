@@ -52,6 +52,20 @@ const vectorBatchTimeout = 60 * time.Second
 // single failure on the freshly-doubled size demotes us again.
 const batchGrowSuccesses = 5
 
+// progressLogInterval is the minimum wall-clock gap between two
+// progress log lines emitted from the adaptive batcher. Bounds the
+// log rate on small-batch slogs (e.g. after a halve event when each
+// batch is just a few seconds).
+const progressLogInterval = 30 * time.Second
+
+// progressLogPercentStep is the minimum percent advance that triggers
+// an early progress log even if progressLogInterval has not yet
+// elapsed. Together they give: at least one line every 30s on a slow
+// pass, and at most 10 lines on a fast pass that finishes in under a
+// minute. Quiet on small reconciles (a handful of paragraphs won't
+// cross either threshold).
+const progressLogPercentStep = 10
+
 // vectorEnabled reports whether semantic indexing is wired up. Both
 // the embedder and the index must be non-nil; either being nil is
 // the "feature disabled" path and all helper methods become no-ops.
@@ -538,6 +552,15 @@ func embedWithAdaptiveBatching(ctx context.Context, embedder Embedder, texts []s
 		i         int
 	)
 
+	// Progress reporting state. lastLogTime starts at the entry to the
+	// batcher so the first progress line shows up at most
+	// progressLogInterval after start (rather than progressLogInterval
+	// after the first successful batch). lastLogPercent is the last
+	// reported percent rounded down to the nearest progressLogPercentStep.
+	startTime := time.Now()
+	lastLogTime := startTime
+	lastLogPercent := 0
+
 	for i < len(texts) {
 		// Honor outer cancellation between batches.
 		if err := ctx.Err(); err != nil {
@@ -574,6 +597,37 @@ func embedWithAdaptiveBatching(ctx context.Context, embedder Embedder, texts []s
 					slog.Int("to", newSize))
 				batchSize = newSize
 				successes = 0
+			}
+
+			// Periodic progress log. Throttled so a small reconcile
+			// stays quiet but a long pass (e.g. model swap rebuilding
+			// thousands of paragraphs) gets a heartbeat the operator
+			// can see. Triggers when either the percent advance crosses
+			// the next progressLogPercentStep bucket OR the wall-clock
+			// gap exceeds progressLogInterval. Final summary is logged
+			// by the caller (runVectorBuild) so we don't double up at
+			// 100%.
+			if i < len(texts) {
+				percent := i * 100 / len(texts)
+				now := time.Now()
+				bucket := percent - (percent % progressLogPercentStep)
+				if bucket > lastLogPercent || now.Sub(lastLogTime) >= progressLogInterval {
+					elapsed := now.Sub(startTime).Round(time.Second)
+					var rate float64
+					if elapsed > 0 {
+						rate = float64(i) / elapsed.Seconds()
+					}
+					logger.Info("embed: progress",
+						slog.Int("done", i),
+						slog.Int("total", len(texts)),
+						slog.Int("percent", percent),
+						slog.Float64("rate_par_per_s", rate),
+						slog.Duration("elapsed", elapsed),
+						slog.Int("batch_size", batchSize),
+						slog.Int("skipped", skipped))
+					lastLogTime = now
+					lastLogPercent = bucket
+				}
 			}
 			continue
 		}

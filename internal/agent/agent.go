@@ -205,6 +205,28 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 
 	toolDefs := a.tools.ToolDefs()
 
+	// Derive a context for tool execution that cancels on either parent
+	// ctx done OR graceful-shutdown signal. The single bridge goroutine
+	// below translates a shutdownCh close into a cancellation on toolCtx.
+	//
+	// LLM Chat calls keep using parent ctx so a generation in flight when
+	// shutdown is requested can finish naturally (cutting it off discards
+	// model reasoning and wastes tokens). Long-running tool calls -- in
+	// particular sleep, but also web_fetch, sandbox runs, embeddings --
+	// must yield to graceful shutdown so the save phase reaches quickly.
+	//
+	// gracefulSave below derives its own saveCtx from parent ctx + a 2 min
+	// timeout, so that path is unaffected by toolCtx.
+	toolCtx, cancelToolCtx := context.WithCancel(ctx)
+	defer cancelToolCtx()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-shutdownCh:
+			cancelToolCtx()
+		}
+	}()
+
 	// Track the message log length and idle streak at the moment of the
 	// last successful save. We only re-save when something has actually
 	// changed since then, so an agent sitting on `select` waiting for
@@ -239,7 +261,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if tokenEst > a.cfg.Agent.CompactionThreshold {
 			a.logger.Warn("context at compaction threshold, compacting",
 				"tokens_est", tokenEst, "threshold", a.cfg.Agent.CompactionThreshold)
-			messages, prompts, err = a.compactContext(ctx, messages, toolDefs, prompts)
+			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
 				return err
 			}
@@ -251,7 +273,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if tokenEst > int(float64(a.cfg.Agent.MaxTokens)*0.95) {
 			a.logger.Warn("context at hard limit, forcing compaction",
 				"tokens_est", tokenEst, "max", a.cfg.Agent.MaxTokens)
-			messages, prompts, err = a.compactContext(ctx, messages, toolDefs, prompts)
+			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
 				return err
 			}
@@ -266,7 +288,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		if idleStreak >= idleForceCompactionThreshold {
 			a.logger.Warn("idle loop detected, forcing compaction",
 				"idle_streak", idleStreak, "tokens_est", tokenEst)
-			messages, prompts, err = a.compactContext(ctx, messages, toolDefs, prompts)
+			messages, prompts, err = a.compactContext(ctx, toolCtx, messages, toolDefs, prompts)
 			if err != nil {
 				return err
 			}
@@ -360,10 +382,13 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			idleStreak = 0
 
 		case len(msg.ToolCalls) > 0:
-			// Normal tool execution path.
+			// Normal tool execution path. Uses toolCtx (cancels on
+			// graceful shutdown) so long-running tools like sleep
+			// yield to a pending shutdown without waiting for ctx
+			// cancellation (which only happens on the second SIGINT).
 			a.tools.SetContextInfo(a.countMessageTokens(messages))
 			for _, tc := range msg.ToolCalls {
-				result := a.tools.Execute(ctx, tc)
+				result := a.tools.Execute(toolCtx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))
 			}
 			idleStreak = 0
@@ -489,7 +514,12 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 // made to its own prompts during compaction take effect on the next turn.
 // The compaction prompt itself was already rendered before this loop began,
 // so edits to prompts/compaction.md only take effect on the *next* compaction.
-func (a *Agent) compactContext(ctx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) ([]llm.Message, map[string]string, error) {
+//
+// ctx is the parent context (used for the LLM Chat calls). toolCtx is the
+// tool-execution context derived in Run; it cancels on either ctx done or
+// the graceful-shutdown signal so any tools issued during compaction also
+// honor a shutdown that arrives mid-compaction.
+func (a *Agent) compactContext(ctx context.Context, toolCtx context.Context, messages []llm.Message, toolDefs []llm.Tool, prompts map[string]string) ([]llm.Message, map[string]string, error) {
 	a.logger.Info("starting context compaction")
 
 	// Inject compaction prompt
@@ -532,7 +562,7 @@ func (a *Agent) compactContext(ctx context.Context, messages []llm.Message, tool
 			a.tools.SetContextInfo(a.countMessageTokens(messages))
 
 			for _, tc := range msg.ToolCalls {
-				result := a.tools.Execute(ctx, tc)
+				result := a.tools.Execute(toolCtx, tc)
 				messages = append(messages, toolMessage(tc.ID, result))
 			}
 		} else {
