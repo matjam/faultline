@@ -107,8 +107,10 @@ cmd/faultline/main.go
         |     +-> skill_work_read  (reads files from a previous skill_execute's
         |                            /work directory by call_id)
         |     +-> skill_install    (optional; fetches tarball/git URL into
-        |                            skills root, validates SKILL.md, reloads
-        |                            catalog. Gated on [skills] install_enabled)
+        |                            skills root, validates SKILL.md, runs
+        |                            audit subagent (when [subagent] enabled,
+        |                            fail-closed on DENY), reloads catalog.
+        |                            Gated on [skills] install_enabled)
         |     +-> email_fetch      (short-lived imap.Client per call)
         |     +-> context_status   (token usage + kobold.Client.Perf if detected)
         |     +-> get_time         (current timestamp)
