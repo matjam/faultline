@@ -24,6 +24,10 @@ type Caller interface {
 
 // Validate checks every configured server.
 func (c Config) Validate() error {
+	if c.Servers == nil {
+		return fmt.Errorf("servers must be an array; use [] when no MCP servers are configured")
+	}
+
 	names := make(map[string]struct{}, len(c.Servers))
 	for i, server := range c.Servers {
 		if err := server.Validate(); err != nil {
@@ -49,6 +53,25 @@ type ServerConfig struct {
 	Headers    map[string]string `json:"headers,omitempty"`
 	AllowTools []string          `json:"allow_tools,omitempty"`
 	DenyTools  []string          `json:"deny_tools,omitempty"`
+}
+
+// UnmarshalJSON accepts both this package's "env" field and the common MCP
+// client config spelling "environment".
+func (c *ServerConfig) UnmarshalJSON(data []byte) error {
+	type serverConfigAlias ServerConfig
+	var raw struct {
+		serverConfigAlias
+		Environment map[string]string `json:"environment,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*c = ServerConfig(raw.serverConfigAlias)
+	if c.Env == nil && raw.Environment != nil {
+		c.Env = raw.Environment
+	}
+	return nil
 }
 
 // ServerStatus is safe to expose to the LLM or collaborator. It reports shape

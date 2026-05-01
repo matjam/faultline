@@ -92,6 +92,57 @@ func TestLoadConfigParsesAndValidatesServers(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsNullServers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(`{"servers":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected null servers to be rejected")
+	}
+}
+
+func TestLoadConfigAllowsEmptyServers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(`{"servers":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Servers) != 0 {
+		t.Fatalf("len(Servers) = %d, want 0", len(cfg.Servers))
+	}
+}
+
+func TestLoadConfigAcceptsEnvironmentAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	contents := `{
+		"servers": [
+			{
+				"name": "nerdoracle",
+				"transport": "stdio",
+				"command": "npx",
+				"environment": {"NERDORACLE_API_URL": "https://example.invalid"}
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Servers[0].Env["NERDORACLE_API_URL"]; got != "https://example.invalid" {
+		t.Fatalf("Env[NERDORACLE_API_URL] = %q, want https://example.invalid", got)
+	}
+}
+
 func TestLoadConfigRejectsInvalidServer(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	contents := `{
