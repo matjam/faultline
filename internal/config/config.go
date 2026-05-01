@@ -18,6 +18,7 @@ type Config struct {
 	Sandbox  SandboxConfig  `toml:"sandbox"`
 	Email    EmailConfig    `toml:"email"`
 	Limits   LimitsConfig   `toml:"limits"`
+	Update   UpdateConfig   `toml:"update"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -128,6 +129,49 @@ func (t TelegramConfig) Enabled() bool {
 	return t.Token != "" && t.ChatID != 0
 }
 
+// UpdateConfig holds settings for the automatic self-update goroutine.
+// Disabled by default; opt in by setting Enabled = true.
+type UpdateConfig struct {
+	// Enabled toggles the entire self-update mechanism. When false, the
+	// updater goroutine doesn't run and the update_check / update_apply
+	// tools are not advertised to the LLM.
+	Enabled bool `toml:"enabled"`
+
+	// CheckInterval controls how often the updater polls GitHub for new
+	// releases. Operator-triggered checks (via the update_check tool)
+	// run on demand regardless. Zero falls back to a 1-hour default.
+	CheckInterval duration `toml:"check_interval"`
+
+	// GitHubRepo is the "owner/name" path of the repository whose
+	// releases we poll. Defaults to "matjam/faultline".
+	GitHubRepo string `toml:"github_repo"`
+
+	// RestartMode controls what the agent does after a successful
+	// update applies. One of:
+	//   "exit"      - save state and os.Exit(0); supervisor (systemd,
+	//                 docker, k8s) is expected to respawn the agent.
+	//   "self-exec" - save state and syscall.Exec the new binary,
+	//                 replacing this process image. Same PID. Suitable
+	//                 for bare-process runs without a supervisor.
+	//   "command"   - save state, run RestartCommand, exit. For custom
+	//                 orchestrators.
+	// Default "exit".
+	RestartMode string `toml:"restart_mode"`
+
+	// RestartCommand is run when RestartMode = "command". Split on
+	// whitespace and exec'd. Empty for the other modes.
+	RestartCommand string `toml:"restart_command"`
+
+	// AllowPrerelease, when true, considers GitHub releases marked as
+	// prerelease (alpha/beta/rc tags) as candidates. Default false.
+	AllowPrerelease bool `toml:"allow_prerelease"`
+
+	// BinaryPath is the absolute path of the running binary. The
+	// updater swaps this file in place. Empty falls back to
+	// os.Executable() at startup.
+	BinaryPath string `toml:"binary_path"`
+}
+
 // EmailConfig holds optional IMAP email connection settings.
 type EmailConfig struct {
 	Host     string `toml:"host"`
@@ -193,6 +237,12 @@ func Default() *Config {
 			MemorySearchResultChars: 6000,
 			SandboxOutputChars:      64000,
 		},
+		Update: UpdateConfig{
+			Enabled:       false,
+			CheckInterval: duration(1 * time.Hour),
+			GitHubRepo:    "matjam/faultline",
+			RestartMode:   "exit",
+		},
 	}
 }
 
@@ -214,6 +264,13 @@ func Load(path string) (*Config, error) {
 	// genuinely wants no sleep cap can set a very large value explicitly.
 	if cfg.Agent.MaxSleep.Duration() <= 0 {
 		cfg.Agent.MaxSleep = duration(15 * time.Minute)
+	}
+
+	// Same logic for update poll interval -- 0 in the file shouldn't
+	// silently disable polling. A user who wants polling off should
+	// set update.enabled = false.
+	if cfg.Update.CheckInterval.Duration() <= 0 {
+		cfg.Update.CheckInterval = duration(1 * time.Hour)
 	}
 
 	return cfg, nil

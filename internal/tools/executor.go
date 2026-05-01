@@ -29,6 +29,8 @@ import (
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/update"
+	"github.com/matjam/faultline/internal/version"
 )
 
 // memoryPathSegment defines the allowed shape of a single path segment
@@ -506,6 +508,47 @@ func (te *Executor) ToolDefs() []llm.Tool {
 				},
 			},
 		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "get_version",
+				Description: "Get the running binary's version, commit SHA, and build time. Use this to confirm what version is running, especially after an update.",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+	}
+
+	// update_check / update_apply only when self-update is enabled in
+	// config. Operators on deployments without self-update can still
+	// query the running version via get_version above.
+	if te.updater != nil && te.updater.Enabled() {
+		tools = append(tools,
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
+					Name:        "update_check",
+					Description: "Check GitHub releases for a newer version of faultline. Does NOT apply anything; just polls. Returns the current version, the latest released version, whether an update is available, and the time of the check.",
+					Parameters: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+			},
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
+					Name:        "update_apply",
+					Description: "Download and apply the latest released version, then trigger graceful shutdown so the new binary takes over. The actual restart strategy (process supervisor exit, self-exec, or a configured restart command) is set in operator config; you don't pick it. Returns an error message if no update is available or if the apply fails.",
+					Parameters: map[string]interface{}{
+						"type":       "object",
+						"properties": map[string]interface{}{},
+					},
+				},
+			},
+		)
 	}
 
 	if te.telegram != nil {
@@ -895,7 +938,8 @@ type Executor struct {
 	telegram      *telegram.Bot
 	sandbox       *docker.Sandbox
 	email         *config.EmailConfig
-	kobold        *kobold.Client // optional; nil means no perf info in context_status
+	kobold        *kobold.Client  // optional; nil means no perf info in context_status
+	updater       *update.Updater // optional; always non-nil but Enabled() may be false
 	logger        *slog.Logger
 	http          *http.Client
 	cache         *webCache
@@ -906,7 +950,7 @@ type Executor struct {
 }
 
 // New creates a new tool executor. kb may be nil.
-func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
+func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
 	if sb != nil {
 		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
@@ -917,6 +961,7 @@ func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandb
 		sandbox:   sb,
 		email:     email,
 		kobold:    kb,
+		updater:   updater,
 		logger:    logger,
 		maxTokens: maxTokens,
 		limits:    limits,
@@ -1010,6 +1055,12 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 		return time.Now().Format("Monday, January 2, 2006 3:04:05 PM MST")
 	case "sleep":
 		return te.sleep(ctx, args)
+	case "get_version":
+		return te.getVersion()
+	case "update_check":
+		return te.updateCheck(ctx)
+	case "update_apply":
+		return te.updateApply(ctx)
 	case "send_message":
 		return te.sendMessage(args)
 	case "email_fetch":
@@ -1776,6 +1827,63 @@ func (te *Executor) sleep(ctx context.Context, argsJSON string) string {
 			}
 		}
 	}
+}
+
+// getVersion returns the running binary's version metadata.
+func (te *Executor) getVersion() string {
+	if te.updater == nil {
+		return "Version: unknown (updater not configured)"
+	}
+	return fmt.Sprintf("Running %s.", version.String())
+}
+
+// updateCheck polls GitHub releases for newer versions without
+// applying anything. Returns a human-readable summary suitable for
+// the LLM.
+func (te *Executor) updateCheck(ctx context.Context) string {
+	if te.updater == nil || !te.updater.Enabled() {
+		return "Error: self-update is not enabled in this deployment."
+	}
+	state := te.updater.Check(ctx)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Current version: %s\n", state.CurrentVersion)
+	if state.LatestVersion != "" {
+		fmt.Fprintf(&sb, "Latest released:  %s\n", state.LatestVersion)
+	}
+	fmt.Fprintf(&sb, "Update available: %v\n", state.UpdateAvailable)
+	fmt.Fprintf(&sb, "Last checked:     %s\n", state.LastChecked.UTC().Format(time.RFC1123))
+	if state.Note != "" {
+		fmt.Fprintf(&sb, "Note: %s\n", state.Note)
+	}
+	if state.Err != nil {
+		fmt.Fprintf(&sb, "Error: %s\n", state.Err)
+	}
+	if state.UpdateAvailable {
+		sb.WriteString("\nCall update_apply to download and install the new version. " +
+			"This will trigger graceful shutdown so the new binary takes over.")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// updateApply triggers the full apply pipeline (download, verify,
+// swap, signal shutdown). Synchronous from the LLM's perspective:
+// returns once the apply finishes (success) or fails. On success the
+// agent enters graceful shutdown immediately afterward, so this is
+// effectively the agent's last tool call before the new binary takes
+// over.
+func (te *Executor) updateApply(ctx context.Context) string {
+	if te.updater == nil || !te.updater.Enabled() {
+		return "Error: self-update is not enabled in this deployment."
+	}
+	res, err := te.updater.Apply(ctx)
+	if err != nil {
+		return fmt.Sprintf("Update apply failed: %s", err)
+	}
+	return fmt.Sprintf("Update applied: %s -> %s. The agent is now shutting down "+
+		"to load the new binary. Save anything important to memory in your "+
+		"next response; the shutdown sequence is about to start.",
+		res.FromVersion, res.ToVersion)
 }
 
 func (te *Executor) memoryEdit(argsJSON string) string {

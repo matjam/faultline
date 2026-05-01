@@ -228,6 +228,17 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 - `Persister`: small wrapper that binds path + logger at construction so the agent can call `Save`/`Load` through the `StateStore` port without re-passing them.
 - `sanitizeMessages`: strips trailing partial turns (assistant messages with unsatisfied `tool_call_id`s) so the resumed log is always a valid replay.
 
+### internal/update/
+
+Self-update orchestration. Polls the configured GitHub repo's `releases/latest`, compares versions, downloads the matching tarball, verifies it against `SHA256SUMS`, swaps the binary in place, and triggers graceful shutdown so the new binary takes over.
+
+- **`Updater`**: main type. Constructed once in `cmd/faultline/main.go`, shared with the tools package via `Check` / `Apply` methods so the `update_check` / `update_apply` tools can drive the same pipeline.
+- **`Run(ctx)`**: background polling loop. First check delayed 30s to avoid hammering GitHub on tight restart loops; subsequent checks on `cfg.CheckInterval`. No-op when `cfg.Enabled` is false.
+- **`Apply(ctx)`**: downloads, verifies SHA256, extracts the binary from the tarball, atomically swaps (rotating old to `<binary>.previous` as a one-deep rollback slot), records to `meta/version-history.md`, and calls the `TriggerShutdown` callback. Serialized by an internal mutex; an `applied` atomic flag prevents repeat applies after one has succeeded.
+- **`Result`**: the value `TriggerShutdown` receives — used by `cmd/faultline/main.go` to decide whether to `os.Exit(0)`, `syscall.Exec` the new binary, or run a configured restart command after `Agent.Run` returns.
+- Asset selection follows goreleaser's name template: `faultline_<version>_<os>_<arch>.tar.gz`, with `amd64` rewritten to `x86_64` to match the Linux convention.
+- `IsNewer` / `IsPrerelease` use `golang.org/x/mod/semver` for tag comparison; non-semver "current" (e.g. `dev` from a local build) is treated as the oldest possible version, so dev builds upgrade to real releases when self-update is enabled.
+
 ## Key Design Patterns
 
 1. **Hexagonal architecture (ports & adapters)**: see `Standards/Hexagonal-Architecture.md` in the user's vault. The agent depends only on interfaces it owns; adapters implement those interfaces structurally.
