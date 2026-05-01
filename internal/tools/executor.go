@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,28 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
 )
+
+// memoryPathSegment defines the allowed shape of a single path segment
+// in memory paths. Lowercase letters, digits, dot, dash. No underscores,
+// no spaces, no uppercase. Applied per-segment so directory components
+// follow the same rule as filenames.
+var memoryPathSegment = regexp.MustCompile(`^[a-z0-9.-]+$`)
+
+// validateMemoryPath returns a descriptive error if any segment of the
+// given path violates the memory naming rule. Empty segments (from
+// leading/trailing/double slashes) are skipped here; the underlying
+// store handles those.
+func validateMemoryPath(path string) error {
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "" {
+			continue
+		}
+		if !memoryPathSegment.MatchString(seg) {
+			return fmt.Errorf("invalid path %q: memory paths must use lowercase letters, digits, dashes, and dots only — no underscores, spaces, or uppercase. Use dashes (e.g. long-term-memory.md) instead of underscores", path)
+		}
+	}
+	return nil
+}
 
 // lineCount returns the number of newline-delimited lines in s. A
 // trailing newline does not add an extra line. Used to build retrieval
@@ -1182,6 +1205,9 @@ func (te *Executor) memoryWrite(argsJSON string) string {
 	}
 	if args.Content == "" {
 		return "Error: content is required"
+	}
+	if err := validateMemoryPath(args.Path); err != nil {
+		return fmt.Sprintf("Error: %s", err)
 	}
 
 	if err := te.memory.Write(args.Path, args.Content); err != nil {

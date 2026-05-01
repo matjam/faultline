@@ -31,6 +31,95 @@ func (m *memStore) Write(path, content string) error {
 	return nil
 }
 
+// Move and Delete satisfy the Migrator interface so tests can exercise
+// prompts.Migrate without dragging in the real fs.Store.
+func (m *memStore) Move(src, dst string) error {
+	v, ok := m.data[src]
+	if !ok {
+		return errors.New("not found")
+	}
+	if _, exists := m.data[dst]; exists {
+		return errors.New("destination exists")
+	}
+	m.data[dst] = v
+	delete(m.data, src)
+	return nil
+}
+
+func (m *memStore) Delete(path string) error {
+	if _, ok := m.data[path]; !ok {
+		return errors.New("not found")
+	}
+	delete(m.data, path)
+	return nil
+}
+
+func TestMigrate_RenamesLegacyCycleStart(t *testing.T) {
+	m := newMemStore()
+	const content = "rich agent-written cycle-start prompt"
+	if err := m.Write("prompts/cycle_start.md", content); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Migrate(m); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	if _, err := m.Read("prompts/cycle_start.md"); err == nil {
+		t.Error("legacy file should have been removed after migration")
+	}
+	got, err := m.Read("prompts/cycle-start.md")
+	if err != nil {
+		t.Fatalf("new file should exist: %v", err)
+	}
+	if got != content {
+		t.Errorf("content mismatch: got %q, want %q", got, content)
+	}
+}
+
+func TestMigrate_NoOpWhenOnlyNewExists(t *testing.T) {
+	m := newMemStore()
+	if err := m.Write("prompts/cycle-start.md", "current"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(m); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	got, _ := m.Read("prompts/cycle-start.md")
+	if got != "current" {
+		t.Errorf("new file changed unexpectedly: %q", got)
+	}
+}
+
+func TestMigrate_ErrorWhenBothExist(t *testing.T) {
+	m := newMemStore()
+	_ = m.Write("prompts/cycle_start.md", "old content")
+	_ = m.Write("prompts/cycle-start.md", "new content")
+
+	err := Migrate(m)
+	if err == nil {
+		t.Fatal("expected error when both files exist")
+	}
+	// Both files should still be present (no destructive action).
+	if _, err := m.Read("prompts/cycle_start.md"); err != nil {
+		t.Error("old file should still exist after conflict")
+	}
+	if _, err := m.Read("prompts/cycle-start.md"); err != nil {
+		t.Error("new file should still exist after conflict")
+	}
+}
+
+func TestMigrate_Idempotent(t *testing.T) {
+	m := newMemStore()
+	_ = m.Write("prompts/cycle_start.md", "x")
+	if err := Migrate(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(m); err != nil {
+		t.Fatalf("second Migrate should be a no-op, got: %v", err)
+	}
+}
+
 func TestRender(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
 	tpl := "Hello, the time is {{TIME}}. Goodbye."
@@ -110,7 +199,7 @@ func TestLoadAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []string{"system", "compaction", "cycle_start", "continue", "shutdown"} {
+	for _, want := range []string{"system", "compaction", "cycle-start", "continue", "shutdown"} {
 		if _, ok := prompts[want]; !ok {
 			t.Errorf("LoadAll missing prompt %q", want)
 		}

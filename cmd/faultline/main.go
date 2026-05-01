@@ -22,6 +22,7 @@ import (
 	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/log"
+	"github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/tools"
 )
@@ -65,6 +66,15 @@ func main() {
 	memory, err := fs.New(cfg.Agent.MemoryDir)
 	if err != nil {
 		logger.Error("init memory store", "error", err)
+		os.Exit(1)
+	}
+
+	// Apply one-time prompt filename migrations (e.g. cycle_start.md ->
+	// cycle-start.md). Errors here mean an unresolvable conflict (both
+	// old and new files present); operator must intervene before we can
+	// safely start.
+	if err := prompts.Migrate(memory); err != nil {
+		logger.Error("prompt migration", "error", err)
 		os.Exit(1)
 	}
 
