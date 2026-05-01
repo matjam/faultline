@@ -6,9 +6,51 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// RateLimitError indicates the GitHub API rejected the request
+// because the rate limit is exhausted. ResetAt is when the limit
+// resets, derived from the X-RateLimit-Reset header; a zero ResetAt
+// means the header was missing or unparseable and the caller should
+// fall back to a default backoff.
+//
+// GitHub's anonymous core API limit is 60 requests per hour per
+// source IP. Authenticated requests get higher limits but the
+// updater intentionally runs anonymously (no token required).
+type RateLimitError struct {
+	ResetAt time.Time
+	Body    string
+}
+
+// Error implements error.
+func (e *RateLimitError) Error() string {
+	if e.ResetAt.IsZero() {
+		return "github rate limit exceeded; reset time unknown"
+	}
+	return fmt.Sprintf("github rate limit exceeded; resets at %s (in %s)",
+		e.ResetAt.Format(time.RFC3339),
+		time.Until(e.ResetAt).Round(time.Second))
+}
+
+// parseRateLimit returns a *RateLimitError when the response headers
+// indicate rate-limit exhaustion. The 403/429 status alone is not
+// sufficient -- 403 is also used for permission errors -- so we key
+// on X-RateLimit-Remaining: 0 specifically.
+func parseRateLimit(resp *http.Response, body string) *RateLimitError {
+	if resp.Header.Get("X-RateLimit-Remaining") != "0" {
+		return nil
+	}
+	e := &RateLimitError{Body: body}
+	if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+		if ts, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			e.ResetAt = time.Unix(ts, 0)
+		}
+	}
+	return e
+}
 
 // githubClient is a tiny client for the subset of GitHub releases API
 // the updater needs. No external SDK because we only consume two
@@ -104,8 +146,19 @@ func (c *githubClient) getRelease(ctx context.Context, path string) (*Release, e
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		bodyStr := strings.TrimSpace(string(body))
+		// Rate-limit detection on 403 (anonymous limit exhaustion)
+		// and 429 (secondary rate limit / abuse detection). The
+		// caller's polling loop uses the typed error to back off
+		// until the documented reset time rather than retrying on
+		// the configured CheckInterval.
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			if rle := parseRateLimit(resp, bodyStr); rle != nil {
+				return nil, rle
+			}
+		}
 		return nil, fmt.Errorf("github releases: HTTP %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(body)))
+			resp.StatusCode, bodyStr)
 	}
 
 	var rel Release
