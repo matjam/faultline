@@ -2,6 +2,7 @@ package prompts
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,6 +167,18 @@ func TestLoad_SeedsDefault(t *testing.T) {
 	}
 	if stored != defaultSystem {
 		t.Error("seeded file content does not match embedded default")
+	}
+}
+
+func TestDefaultSystemPromptIncludesMCPGuidance(t *testing.T) {
+	for _, want := range []string{
+		"mcp_discover_tools",
+		"allow_tools",
+		"collaborator approval",
+	} {
+		if !strings.Contains(defaultSystem, want) {
+			t.Fatalf("default system prompt missing %q", want)
+		}
 	}
 }
 

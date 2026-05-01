@@ -60,9 +60,10 @@ type Tokenizer interface {
 }
 
 // Tools is the tool registry and dispatcher the agent drives the LLM
-// against. Implemented by *tools.Executor. ToolDefs is fixed for the
-// life of the process; Execute runs one tool call and returns the
-// result body that will be wrapped in a tool-role chat message.
+// against. Implemented by *tools.Executor. ToolDefs may change when
+// operator-approved runtime capabilities change; Execute runs one tool
+// call and returns the result body that will be wrapped in a tool-role
+// chat message.
 //
 // The agent owns the tool executor's lifecycle: Close is invoked from
 // Agent.Close, so the composition root must not separately defer a

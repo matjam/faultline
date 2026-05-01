@@ -20,6 +20,7 @@ import (
 
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
 	"github.com/matjam/faultline/internal/adapters/llm/openai"
+	"github.com/matjam/faultline/internal/adapters/mcp"
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
@@ -215,6 +216,16 @@ func main() {
 		email = &cfg.Email
 	}
 
+	mcpCaller, mcpDiscovered, err := setupMCP(ctx, cfg.MCP, logger)
+	if err != nil {
+		logger.Error("init mcp", "error", err)
+		os.Exit(1)
+	}
+	var mcpApprovals *mcp.Approvals
+	if cfg.MCP.Enabled && cfg.MCP.AllowAgentEditConfig {
+		mcpApprovals = mcp.NewApprovals()
+	}
+
 	// Updater. Always constructed so the get_version tool works even
 	// when self-update is disabled; the polling goroutine starts only
 	// when cfg.Update.Enabled.
@@ -301,6 +312,8 @@ func main() {
 			Embedder:    embedder,
 			Skills:      skillStore,
 			WebCache:    webCache,
+			MCPCaller:   mcpCaller,
+			MCPTools:    mcpDiscovered,
 			Logger:      logger,
 		})
 	} else {
@@ -308,25 +321,33 @@ func main() {
 	}
 
 	toolExec := tools.New(tools.Deps{
-		Mode:                tools.ModePrimary,
-		Memory:              memory,
-		Index:               index,
-		VectorIndex:         vIndex,
-		Telegram:            tg,
-		Sandbox:             sb,
-		Email:               email,
-		Kobold:              kb,
-		Updater:             updater,
-		Embedder:            embedder,
-		Skills:              skillStore,
-		SkillInstallEnabled: cfg.Skills.InstallEnabled,
-		EmbedBatchSize:      cfg.Embeddings.BatchSize,
-		Logger:              logger,
-		WebCache:            webCache,
-		MaxTokens:           cfg.Agent.MaxTokens,
-		Limits:              cfg.Limits,
-		MaxSleep:            cfg.Agent.MaxSleep.Duration(),
-		SubagentManager:     subMgr,
+		Mode:                 tools.ModePrimary,
+		Memory:               memory,
+		Index:                index,
+		VectorIndex:          vIndex,
+		Telegram:             tg,
+		Sandbox:              sb,
+		Email:                email,
+		Kobold:               kb,
+		Updater:              updater,
+		Embedder:             embedder,
+		Skills:               skillStore,
+		SkillInstallEnabled:  cfg.Skills.InstallEnabled,
+		EmbedBatchSize:       cfg.Embeddings.BatchSize,
+		MCPDiscovered:        mcpDiscovered,
+		MCPCaller:            mcpCaller,
+		MCPConfigFile:        cfg.MCP.ConfigFile,
+		MCPConfigEditEnabled: cfg.MCP.Enabled && cfg.MCP.AllowAgentEditConfig,
+		MCPApprovals:         mcpApprovals,
+		MCPReload: func(ctx context.Context) (mcp.Caller, []mcp.DiscoveredServer, error) {
+			return setupMCP(ctx, cfg.MCP, logger)
+		},
+		Logger:          logger,
+		WebCache:        webCache,
+		MaxTokens:       cfg.Agent.MaxTokens,
+		Limits:          cfg.Limits,
+		MaxSleep:        cfg.Agent.MaxSleep.Duration(),
+		SubagentManager: subMgr,
 	})
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
 	// executor's lifecycle via the Tools port; agent.Close() (deferred
@@ -439,7 +460,9 @@ func dispatchRestart(r update.Result, mode, command, binaryPath string, logger *
 		// On success this call never returns. On failure we fall
 		// through to os.Exit so the supervisor (if any) can pick up
 		// the new binary on the next start.
-		if err := syscall.Exec(binaryPath, os.Args, os.Environ()); err != nil {
+		// binaryPath is the validated self-update target path selected during
+		// startup, not shell-expanded user input.
+		if err := syscall.Exec(binaryPath, os.Args, os.Environ()); err != nil { // #nosec G204 // nosemgrep
 			logger.Error("self-exec failed; falling back to exit", "error", err)
 			os.Exit(1)
 		}
@@ -463,7 +486,9 @@ func runRestartCommand(command string, logger *slog.Logger) {
 		logger.Warn("restart_command is empty; nothing to run")
 		return
 	}
-	cmd := exec.Command(parts[0], parts[1:]...)
+	// restart_command is an operator-configured post-update command and is
+	// executed without a shell.
+	cmd := exec.Command(parts[0], parts[1:]...) // #nosec G204 // nosemgrep
 	// Detach: new session group so the child outlives our exit.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

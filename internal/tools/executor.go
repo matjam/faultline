@@ -22,6 +22,7 @@ import (
 
 	"github.com/matjam/faultline/internal/adapters/email/imap"
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
+	"github.com/matjam/faultline/internal/adapters/mcp"
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
@@ -111,14 +112,18 @@ func (m Mode) String() string {
 // call) and Execute defensive rejection (reject calls anyway, in case
 // a flaky LLM hallucinates one).
 var subagentForbidden = map[string]struct{}{
-	"sleep":           {},
-	"update_check":    {},
-	"update_apply":    {},
-	"subagent_run":    {},
-	"subagent_spawn":  {},
-	"subagent_wait":   {},
-	"subagent_status": {},
-	"subagent_cancel": {},
+	"sleep":                     {},
+	"update_check":              {},
+	"update_apply":              {},
+	"mcp_list_servers":          {},
+	"mcp_discover_tools":        {},
+	"mcp_propose_config_update": {},
+	"mcp_update_config":         {},
+	"subagent_run":              {},
+	"subagent_spawn":            {},
+	"subagent_wait":             {},
+	"subagent_status":           {},
+	"subagent_cancel":           {},
 }
 
 // ToolDefs returns the tool definitions for the OpenAI API.
@@ -929,6 +934,17 @@ func (te *Executor) ToolDefs() []llm.Tool {
 		tools = append(tools, defs...)
 	}
 
+	if defs := te.mcpManagementToolDefs(); len(defs) > 0 {
+		tools = append(tools, defs...)
+	}
+	if defs := te.mcpConfigToolDefs(); len(defs) > 0 {
+		tools = append(tools, defs...)
+	}
+
+	if defs := mcp.ToolDefs(te.mcpDiscovered); len(defs) > 0 {
+		tools = append(tools, defs...)
+	}
+
 	// Subagent delegation. Mode-aware: primary gets the four
 	// run/spawn/status/cancel tools; subagent gets just the report
 	// tool. Returns nil when not wired.
@@ -985,6 +1001,12 @@ type Executor struct {
 	skillInstallEnabled bool            // when false, skill_install is not advertised or executable
 	skillsRoot          string          // absolute path to the skills root; empty when skills disabled
 	embedBatchSize      int             // batch size for bulk embed calls (rebuild_indexes); 0 -> default
+	mcpDiscovered       []mcp.DiscoveredServer
+	mcpCaller           mcp.Caller
+	mcpConfigFile       string
+	mcpConfigEdit       bool
+	mcpApprovals        *mcp.Approvals
+	mcpReload           func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error)
 	logger              *slog.Logger
 	http                *http.Client
 	cache               *WebCache // borrowed from composition root; not closed here
@@ -1015,24 +1037,30 @@ type Executor struct {
 // Embedder and VectorIndex must be both nil (feature off) or both
 // non-nil (feature on); main.go is responsible for that pairing.
 type Deps struct {
-	Mode                Mode
-	Memory              *fs.Store
-	Index               *bm25.Index
-	VectorIndex         *vector.Index
-	Telegram            *telegram.Bot
-	Sandbox             *docker.Sandbox
-	Email               *config.EmailConfig
-	Kobold              *kobold.Client
-	Updater             *update.Updater
-	Embedder            Embedder
-	Skills              *skillsfs.Store
-	SkillInstallEnabled bool
-	EmbedBatchSize      int
-	Logger              *slog.Logger
-	WebCache            *WebCache
-	MaxTokens           int
-	Limits              config.LimitsConfig
-	MaxSleep            time.Duration
+	Mode                 Mode
+	Memory               *fs.Store
+	Index                *bm25.Index
+	VectorIndex          *vector.Index
+	Telegram             *telegram.Bot
+	Sandbox              *docker.Sandbox
+	Email                *config.EmailConfig
+	Kobold               *kobold.Client
+	Updater              *update.Updater
+	Embedder             Embedder
+	Skills               *skillsfs.Store
+	SkillInstallEnabled  bool
+	EmbedBatchSize       int
+	MCPDiscovered        []mcp.DiscoveredServer
+	MCPCaller            mcp.Caller
+	MCPConfigFile        string
+	MCPConfigEditEnabled bool
+	MCPApprovals         *mcp.Approvals
+	MCPReload            func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error)
+	Logger               *slog.Logger
+	WebCache             *WebCache
+	MaxTokens            int
+	Limits               config.LimitsConfig
+	MaxSleep             time.Duration
 
 	// SubagentManager is set on the primary Executor when subagent
 	// support is enabled. nil for child Executors and for primaries
@@ -1090,6 +1118,12 @@ func New(deps Deps) *Executor {
 		skillInstallEnabled: deps.SkillInstallEnabled,
 		skillsRoot:          skillsRoot,
 		embedBatchSize:      deps.EmbedBatchSize,
+		mcpDiscovered:       deps.MCPDiscovered,
+		mcpCaller:           deps.MCPCaller,
+		mcpConfigFile:       deps.MCPConfigFile,
+		mcpConfigEdit:       deps.MCPConfigEditEnabled,
+		mcpApprovals:        deps.MCPApprovals,
+		mcpReload:           deps.MCPReload,
 		logger:              deps.Logger,
 		maxTokens:           deps.MaxTokens,
 		limits:              deps.Limits,
@@ -1101,6 +1135,7 @@ func New(deps Deps) *Executor {
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
+					MinVersion:         tls.VersionTLS13,
 					InsecureSkipVerify: false,
 				},
 			},
@@ -1208,6 +1243,14 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 		return te.sendMessage(args)
 	case "email_fetch":
 		return te.emailFetch(args)
+	case "mcp_list_servers":
+		return te.mcpListServers()
+	case "mcp_discover_tools":
+		return te.mcpDiscoverTools()
+	case "mcp_propose_config_update":
+		return te.mcpProposeConfigUpdate(args)
+	case "mcp_update_config":
+		return te.mcpUpdateConfig(ctx, args)
 	// Sandbox tools
 	case "sandbox_write":
 		return te.sandboxWrite(args)
@@ -1262,8 +1305,185 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 	case "subagent_report":
 		return te.subagentReport(args)
 	default:
+		if strings.HasPrefix(name, "mcp_") {
+			return te.mcpExecute(ctx, name, args)
+		}
 		return fmt.Sprintf("Unknown tool: %s", name)
 	}
+}
+
+func (te *Executor) mcpManagementToolDefs() []llm.Tool {
+	if te.mode != ModePrimary || len(te.mcpDiscovered) == 0 {
+		return nil
+	}
+
+	params := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+	return []llm.Tool{
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "mcp_list_servers",
+				Description: "List configured MCP servers with redacted status. Does not expose secrets, command details, URLs, headers, or environment values.",
+				Parameters:  params,
+			},
+		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "mcp_discover_tools",
+				Description: "Show discovered MCP tools and whether each is currently allowlisted/callable. Unallowlisted tools are listed for review but are not callable.",
+				Parameters:  params,
+			},
+		},
+	}
+}
+
+func (te *Executor) mcpConfigToolDefs() []llm.Tool {
+	if te.mode != ModePrimary || !te.mcpConfigEdit || te.mcpApprovals == nil || te.mcpConfigFile == "" {
+		return nil
+	}
+
+	configParam := map[string]interface{}{
+		"type":        "object",
+		"description": "Full replacement contents for the dedicated MCP config file.",
+	}
+	return []llm.Tool{
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "mcp_propose_config_update",
+				Description: "Validate and propose an MCP config update. This creates a pending approval and does not write any files.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"config": configParam,
+					},
+					"required": []string{"config"},
+				},
+			},
+		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "mcp_update_config",
+				Description: "Apply an approved MCP config update to the dedicated MCP config file. Requires raw collaborator approval for the exact proposed config.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"approval_id": map[string]interface{}{"type": "string"},
+						"config":      configParam,
+					},
+					"required": []string{"approval_id", "config"},
+				},
+			},
+		},
+	}
+}
+
+func (te *Executor) mcpListServers() string {
+	statuses := make([]mcp.ServerStatus, 0, len(te.mcpDiscovered))
+	for _, discovered := range te.mcpDiscovered {
+		statuses = append(statuses, discovered.Server.Status())
+	}
+	return marshalToolResult(statuses)
+}
+
+func (te *Executor) mcpDiscoverTools() string {
+	statuses := make([]mcp.DiscoveryStatus, 0, len(te.mcpDiscovered))
+	for _, discovered := range te.mcpDiscovered {
+		statuses = append(statuses, discovered.Status())
+	}
+	return marshalToolResult(statuses)
+}
+
+func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
+	var args struct {
+		Config mcp.Config `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+	if te.mcpApprovals == nil {
+		return "MCP config approvals are not configured."
+	}
+	if err := args.Config.Validate(); err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+
+	id, hash, approvalText, err := te.mcpApprovals.Propose(args.Config)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\ndiff_hash: %s\nAsk the collaborator to reply exactly with:\n%s", id, hash, approvalText)
+}
+
+func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string {
+	var args struct {
+		ApprovalID string     `json:"approval_id"`
+		Config     mcp.Config `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+	if !te.mcpConfigEdit || te.mcpConfigFile == "" || te.mcpApprovals == nil {
+		return "MCP config updates are not configured."
+	}
+	if args.ApprovalID == "" {
+		return "Error: approval_id is required"
+	}
+	if err := args.Config.Validate(); err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if !te.mcpApprovals.Consume(args.ApprovalID, args.Config) {
+		return "MCP config update requires raw collaborator approval for this exact change."
+	}
+	if err := mcp.SaveConfig(te.mcpConfigFile, args.Config); err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if te.mcpReload != nil {
+		caller, discovered, err := te.mcpReload(ctx)
+		if err != nil {
+			return fmt.Sprintf("MCP config updated on disk, but live reload failed: %s", err)
+		}
+		te.mcpCaller = caller
+		te.mcpDiscovered = discovered
+	}
+	return "MCP config updated."
+}
+
+// RecordCollaboratorMessage records raw collaborator text before it is wrapped
+// into model-visible conversation content.
+func (te *Executor) RecordCollaboratorMessage(text string) {
+	if te.mcpApprovals != nil {
+		te.mcpApprovals.RecordRaw(text)
+	}
+}
+
+func (te *Executor) mcpExecute(ctx context.Context, name, argsJSON string) string {
+	resolved, ok := mcp.ResolveToolName(te.mcpDiscovered, name)
+	if !ok {
+		return fmt.Sprintf("MCP tool %q is not configured or allowlisted.", name)
+	}
+	if te.mcpCaller == nil {
+		return "MCP caller is not configured."
+	}
+
+	result, err := te.mcpCaller.CallTool(ctx, resolved.ServerName, resolved.ToolName, json.RawMessage(argsJSON))
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return result
+}
+
+func marshalToolResult(v any) string {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return string(data)
 }
 
 func (te *Executor) sandboxShell(ctx context.Context, argsJSON string) string {

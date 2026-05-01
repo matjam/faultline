@@ -9,6 +9,7 @@ import (
 
 	"github.com/matjam/faultline/internal/adapters/llm/kobold"
 	"github.com/matjam/faultline/internal/adapters/llm/openai"
+	"github.com/matjam/faultline/internal/adapters/mcp"
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
@@ -38,6 +39,8 @@ type subagentDeps struct {
 	Embedder    tools.Embedder
 	Skills      *skillsfs.Store
 	WebCache    *tools.WebCache
+	MCPCaller   mcp.Caller
+	MCPTools    []mcp.DiscoveredServer
 	Logger      *slog.Logger
 }
 
@@ -117,7 +120,7 @@ const subagentSystemPrompt = `You are a SUBAGENT of a primary agent. The primary
 
 Rules:
   - When you have finished (or determined the work cannot be done), call the subagent_report tool with a self-contained summary. After that call, your loop will exit -- do not issue further tool calls.
-  - You have access to the same tools as the primary, EXCEPT: sleep, update_check, update_apply, and the subagent_* tools (no nested delegation). The send_message tool is available; use it sparingly.
+  - You have access to the same tools as the primary, EXCEPT: sleep, update_check, update_apply, MCP management/config tools, and the subagent_* tools (no nested delegation). The send_message tool is available; use it sparingly.
   - You share the primary's memory store, search indexes, sandbox, and skills catalog. Memory writes are visible to the primary and to other subagents.
   - The primary cannot see your conversation. Only the subagent_report payload reaches them. Put EVERYTHING the primary needs to know in that report.
 
@@ -224,6 +227,8 @@ func runSubagent(
 		Skills:              deps.Skills,
 		SkillInstallEnabled: false,
 		EmbedBatchSize:      cfg.Embeddings.BatchSize,
+		MCPDiscovered:       deps.MCPTools,
+		MCPCaller:           deps.MCPCaller,
 		Logger:              childLogger,
 		WebCache:            deps.WebCache,
 		MaxTokens:           childCfg.Agent.MaxTokens,
