@@ -1,0 +1,242 @@
+package adminhttp
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/matjam/faultline/internal/adapters/auth/users"
+)
+
+// loginData drives the login template.
+type loginData struct {
+	Title         string
+	Authenticated bool
+	Username      string // pre-fill on retry
+	Error         string
+	CSRFToken     string // pre-session CSRF (form-only, not yet bound)
+	Next          string
+}
+
+// handleLoginGet renders the login form. Already-authenticated users
+// are redirected straight to the dashboard so the form isn't
+// reachable when there's nothing to do.
+//
+// We mint a *transient* CSRF token tied to the form via a short-lived
+// cookie, so even pre-authentication forms cannot be cross-site
+// posted. On successful login the real session takes over.
+func (s *Server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
+	if sess := s.currentSession(r); sess != nil {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+
+	csrf, err := s.issueLoginCSRF(w)
+	if err != nil {
+		s.deps.Logger.Error("admin: issue login csrf", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	data := loginData{
+		Title:         "Sign in",
+		Authenticated: false,
+		CSRFToken:     csrf,
+		Next:          safeNext(r.URL.Query().Get("next")),
+	}
+	s.render(w, "login.html", data)
+}
+
+// handleLoginPost validates credentials and (on success) mints a
+// session, sets the session cookie, and redirects to the requested
+// `next` (defaulting to /admin). Failures re-render the form with a
+// generic error — we never disclose whether the username existed.
+func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if !s.checkLoginCSRF(r) {
+		s.deps.Logger.Warn("admin: login csrf rejected", "remote", r.RemoteAddr)
+		http.Error(w, "csrf token mismatch", http.StatusForbidden)
+		return
+	}
+
+	username := strings.TrimSpace(r.PostFormValue("username"))
+	password := r.PostFormValue("password")
+	next := safeNext(r.PostFormValue("next"))
+	if next == "" {
+		next = "/admin"
+	}
+
+	user, err := s.deps.Users.Verify(username, password)
+	if err != nil {
+		// Generic error message; do not leak whether user exists.
+		s.deps.Logger.Info("admin: login failed",
+			"username", username,
+			"remote", r.RemoteAddr,
+			"reason", classify(err))
+		// Re-issue a fresh login CSRF for the retry.
+		csrf, ierr := s.issueLoginCSRF(w)
+		if ierr != nil {
+			s.deps.Logger.Error("admin: issue login csrf", "error", ierr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		data := loginData{
+			Title:         "Sign in",
+			Authenticated: false,
+			Username:      username,
+			Error:         "Invalid username or password.",
+			CSRFToken:     csrf,
+			Next:          next,
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		s.render(w, "login.html", data)
+		return
+	}
+
+	sess, err := s.deps.Sessions.New(user.Name)
+	if err != nil {
+		s.deps.Logger.Error("admin: new session", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Set the session cookie. HttpOnly + SameSite=Lax on a
+	// loopback bind covers the realistic threat model (browser-
+	// side XSS, naive CSRF). Secure is gated on a forwarded TLS
+	// hint so reverse-proxy deployments keep the flag without
+	// breaking direct loopback.
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    sess.Token,
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isLikelyTLS(r),
+		// Session cookie (no MaxAge): expires when the browser
+		// closes, in addition to the server-side TTL eviction.
+	})
+
+	// Clear the transient login-CSRF cookie now that the real
+	// session has taken over.
+	clearLoginCSRF(w)
+
+	s.deps.Logger.Info("admin: login ok", "username", user.Name, "remote", r.RemoteAddr)
+	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// handleLogout deletes the session and redirects to the login form.
+// Reachable only from within requireAuth, so the session is known
+// to exist.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	s.deps.Sessions.Delete(sess.Token)
+
+	// Clear the cookie regardless of session state.
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isLikelyTLS(r),
+		MaxAge:   -1,
+	})
+
+	s.deps.Logger.Info("admin: logout", "username", sess.Username)
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+}
+
+// classify returns a short string for log purposes without leaking
+// which credential half was wrong (the operator log file already
+// captures everything; the network response says "invalid").
+func classify(err error) string {
+	switch {
+	case errors.Is(err, users.ErrUserNotFound):
+		return "no-such-user"
+	case errors.Is(err, users.ErrPasswordMismatch):
+		return "wrong-password"
+	case errors.Is(err, users.ErrInvalidHash), errors.Is(err, users.ErrUnsupportedHash):
+		return "corrupt-hash"
+	default:
+		return "other"
+	}
+}
+
+// --- login-form CSRF ------------------------------------------------
+//
+// The login form has no session yet, so the standard per-session
+// CSRF token doesn't apply. Instead we issue a short-lived random
+// token in a separate cookie and require the form to echo it back.
+// On any login attempt the cookie is rotated (issueLoginCSRF
+// always overwrites). This blocks naive CSRF on the login endpoint
+// without relying on the as-yet-nonexistent session.
+
+const loginCSRFCookie = "faultline_login_csrf"
+
+func (s *Server) issueLoginCSRF(w http.ResponseWriter) (string, error) {
+	tok, err := randomLoginToken()
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginCSRFCookie,
+		Value:    tok,
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int((10 * time.Minute).Seconds()),
+	})
+	return tok, nil
+}
+
+func (s *Server) checkLoginCSRF(r *http.Request) bool {
+	cookie, err := r.Cookie(loginCSRFCookie)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	supplied := r.PostFormValue(csrfFormField)
+	if supplied == "" {
+		return false
+	}
+	// Constant-time compare via the helper we already use for
+	// session CSRF; build a synthetic Session so we can reuse it.
+	return users.VerifyCSRF(&users.Session{CSRFToken: cookie.Value}, supplied) == nil
+}
+
+func clearLoginCSRF(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginCSRFCookie,
+		Value:    "",
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
+}
+
+// randomLoginToken matches the entropy of session tokens but lives
+// in its own helper so the package's session/token surface can
+// evolve independently.
+func randomLoginToken() (string, error) {
+	return users.NewToken()
+}
+
+// isLikelyTLS reports whether the request reached us via TLS (either
+// directly — we don't terminate TLS, but a future caller might — or
+// through a reverse proxy that set X-Forwarded-Proto=https). We use
+// this only to set the Secure cookie flag; getting it wrong on a
+// loopback dev setup just means the cookie isn't marked Secure.
+func isLikelyTLS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if v := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(v, "https") {
+		return true
+	}
+	return false
+}

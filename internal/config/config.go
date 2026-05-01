@@ -37,6 +37,12 @@ type Config struct {
 	// alternative LLM endpoints; the synthesized "default" profile
 	// (matching [api]) is always available when Enabled is true.
 	Subagent SubagentConfig `toml:"subagent"`
+
+	// Admin is optional; when Enabled, an HTTP admin UI is bound to
+	// the configured loopback address. Auth is local: argon2id
+	// password hashes in users.toml, single auto-provisioned admin
+	// user on first run.
+	Admin AdminConfig `toml:"admin"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -364,6 +370,52 @@ func (s SubagentConfig) Active() bool {
 	return s.Enabled
 }
 
+// AdminConfig holds settings for the embedded HTTP admin UI. When
+// Enabled, the agent binds an HTTP server (no TLS; meant to live
+// behind a reverse proxy or be reached via SSH tunnel) on the
+// configured Bind address. Auth is local-only: argon2id password
+// hashes in UsersFile, with a single admin user auto-provisioned on
+// first run.
+//
+// Disabled by default. The admin server runs in the same process as
+// the agent, sharing memory directly (no IPC); enabling it widens
+// the agent's attack surface and so is opt-in.
+type AdminConfig struct {
+	// Enabled toggles the entire feature. When false, the admin
+	// server is not constructed and no port is bound.
+	Enabled bool `toml:"enabled"`
+
+	// Bind is the loopback address:port to listen on. Default is
+	// "127.0.0.1:8742". 8080 is intentionally avoided as it
+	// collides with too many other dev tools. Operators who want
+	// remote access should reverse-proxy through nginx/caddy/etc.
+	// rather than binding 0.0.0.0 directly; the admin server has
+	// no built-in TLS.
+	Bind string `toml:"bind"`
+
+	// UsersFile is the path to the TOML file holding argon2id
+	// password hashes. Created on first run with a randomly
+	// generated admin password emitted both as a file comment and
+	// a WARN-level log line. Default "./users.toml".
+	UsersFile string `toml:"users_file"`
+
+	// SkillsFile is the path to a small TOML file recording which
+	// skills are operator-disabled. Read on every catalog reload;
+	// missing file is fine (all skills enabled). Default
+	// "./skills.toml".
+	SkillsFile string `toml:"skills_file"`
+
+	// SessionTTL is the idle timeout for an admin session.
+	// Sessions older than this with no activity are evicted from
+	// the in-memory session store. Default 12h.
+	SessionTTL duration `toml:"session_ttl"`
+}
+
+// Active reports whether admin support should be wired up.
+func (a AdminConfig) Active() bool {
+	return a.Enabled && a.Bind != ""
+}
+
 // EmailConfig holds optional IMAP email connection settings.
 type EmailConfig struct {
 	Host     string `toml:"host"`
@@ -460,6 +512,13 @@ func Default() *Config {
 			MaxInbox:       32,
 			RunTimeout:     duration(30 * time.Minute),
 		},
+		Admin: AdminConfig{
+			Enabled:    false,
+			Bind:       "127.0.0.1:8742",
+			UsersFile:  "./users.toml",
+			SkillsFile: "./skills.toml",
+			SessionTTL: duration(12 * time.Hour),
+		},
 	}
 }
 
@@ -512,6 +571,21 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Subagent.RunTimeout.Duration() <= 0 {
 		cfg.Subagent.RunTimeout = duration(30 * time.Minute)
+	}
+
+	// Admin: backfill defaults when the operator enables the feature
+	// but leaves the housekeeping fields at zero.
+	if cfg.Admin.Bind == "" {
+		cfg.Admin.Bind = "127.0.0.1:8742"
+	}
+	if cfg.Admin.UsersFile == "" {
+		cfg.Admin.UsersFile = "./users.toml"
+	}
+	if cfg.Admin.SkillsFile == "" {
+		cfg.Admin.SkillsFile = "./skills.toml"
+	}
+	if cfg.Admin.SessionTTL.Duration() <= 0 {
+		cfg.Admin.SessionTTL = duration(12 * time.Hour)
 	}
 
 	return cfg, nil

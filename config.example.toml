@@ -379,3 +379,43 @@ run_timeout = "30m"
 # api_key = "sk-..."
 # model = "gpt-4o"
 # purpose = "Deep research, architecture analysis, careful reasoning. Slow."
+
+# ---------------------------------------------------------------------------
+# [admin] — embedded HTTP admin UI.
+#
+# When enabled, the agent binds an HTTP server on the configured loopback
+# address. The UI is HTMX + DaisyUI based (assets are embedded in the
+# binary; no Node toolchain required). Auth is local: argon2id password
+# hashes in users_file. On first start, a single admin user is auto-
+# provisioned with a randomly generated password — the plaintext is
+# emitted both as a comment in users_file AND as a WARN-level log line
+# at startup. After your first login, change the password from the UI.
+#
+# There is no built-in TLS. For remote access, terminate TLS at a reverse
+# proxy (nginx, caddy, traefik, ...) and forward to this loopback bind.
+# Direct LAN exposure (0.0.0.0:NN) without TLS is not recommended.
+#
+# The admin server runs in the same process as the agent and shares its
+# memory directly; enabling it widens the agent's attack surface, which
+# is why the feature is opt-in.
+# ---------------------------------------------------------------------------
+[admin]
+enabled = false
+
+# Loopback address:port to listen on. 8742 was chosen instead of the
+# more common 8080 to dodge collisions with other dev tooling. Bind to
+# 127.0.0.1 unless you have a specific reason not to.
+bind = "127.0.0.1:8742"
+
+# Path to the TOML file holding argon2id password hashes. Created on
+# first run (treat its contents as secret material — do not commit).
+users_file = "./users.toml"
+
+# Path to a small TOML file recording skill enable/disable state. Used
+# in a later stage by the admin UI's skills page; missing file means
+# "all skills enabled".
+skills_file = "./skills.toml"
+
+# Idle session TTL. Sessions older than this with no activity are
+# evicted from the in-memory store, requiring a fresh login.
+session_ttl = "12h"

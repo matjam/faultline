@@ -368,6 +368,27 @@ func main() {
 	}, logger)
 	defer a.Close()
 
+	// --- Admin UI -------------------------------------------------------
+	// Optional embedded HTTP server for operator-facing administration.
+	// Stage 2 surface area: login, logout, dashboard stub. Inspector
+	// ports onto agent state come in later stages.
+	//
+	// The admin server runs under the parent ctx so that BOTH
+	// signals collapse it eventually:
+	//   - first SIGINT closes shutdownCh (agent saves state) but the
+	//     admin server stays up so the operator can watch shutdown
+	//     progress in a future stage;
+	//   - second SIGINT cancels ctx, which triggers admin shutdown.
+	//
+	// On graceful agent exit (first-signal path), we explicitly cancel
+	// ctx after Run returns so the admin server's Run unblocks.
+	adminSrv, err := buildAdmin(ctx, cfg, time.Now(), logger)
+	if err != nil {
+		logger.Error("admin UI failed to start", "error", err)
+		os.Exit(1)
+	}
+	adminSrv.Start(ctx)
+
 	logger.Info("agent starting",
 		"api_url", cfg.API.URL,
 		"model", cfg.API.Model,
@@ -378,10 +399,20 @@ func main() {
 
 	if err := a.Run(ctx, shutdownCh); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("agent terminated with error", "error", err)
+		// Best-effort admin shutdown before exit.
+		forceCancel()
+		adminSrv.Wait()
+		adminSrv.Close()
 		os.Exit(1)
 	}
 
 	logger.Info("agent shut down gracefully")
+
+	// Wind down the admin server. The agent has saved state and
+	// returned; nothing else useful runs through the admin UI now.
+	forceCancel()
+	adminSrv.Wait()
+	adminSrv.Close()
 
 	// If shutdown was triggered by an applied update, dispatch the
 	// configured restart action. Adapters that own their own resources

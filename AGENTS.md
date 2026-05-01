@@ -54,6 +54,13 @@ faultline/
       email/imap/             IMAP email client
       state/jsonfile/         JSON-file conversation persistence (Save/Load
                               + Persister wrapper that satisfies StateStore)
+      auth/users/             argon2id password hashing, users.toml load/save
+                              with first-run admin bootstrap, in-memory
+                              session store, CSRF helpers — admin UI
+                              authentication primitives
+      admin/http/             embedded HTTP admin UI (HTMX + DaisyUI),
+                              login/logout/dashboard skeleton; static assets
+                              and html/template files embedded via go:embed
 ```
 
 The `internal/` prefix is enforced by Go: nothing outside this module can import these packages. That's a feature.
@@ -326,6 +333,28 @@ Self-update orchestration. Polls the configured GitHub repo's `releases/latest`,
 - Asset selection follows goreleaser's name template: `faultline_<version>_<os>_<arch>.tar.gz`, with `amd64` rewritten to `x86_64` to match the Linux convention.
 - `IsNewer` / `IsPrerelease` use `golang.org/x/mod/semver` for tag comparison; non-semver "current" (e.g. `dev` from a local build) is treated as the oldest possible version, so dev builds upgrade to real releases when self-update is enabled.
 
+### internal/adapters/auth/users/
+
+Local-auth primitives consumed by the admin HTTP adapter. No domain dependency; the agent loop knows nothing about users or sessions.
+
+- **`argon2.go`**: `HashPassword` / `VerifyPassword`. argon2id, OWASP-ish defaults (`m=64 MiB, t=3, p=4, keylen=32, saltlen=16`). PHC string format on disk so params are self-describing — changing the constants does not invalidate existing hashes. Constant-time compare in Verify.
+- **`users.go`**: `Store` (TOML-file-backed user list under a mutex). `New(path)` returns a `*BootstrapResult` exactly once on the first call against a missing file, with a freshly generated 24-char password drawn from a confusable-free alphabet. The plaintext is also written into the file as a comment so the operator can recover it after the log line scrolls. File perms are `0600`. `Verify` runs a dummy hash against an unknown-user lookup so timing does not betray account existence.
+- **`session.go`**: `SessionStore` is in-memory only; restarts evict everything. Janitor goroutine evicts idle sessions on a 1-minute tick; `Get` also evicts eagerly when called past TTL. `NewToken` is exported as a small primitive the admin adapter reuses for the pre-session login-form CSRF token. `VerifyCSRF` does the constant-time compare.
+
+### internal/adapters/admin/http/
+
+Embedded HTTP admin UI driving adapter (stage-2 skeleton). Stdlib `net/http` only — no chi/gin/echo — to match the project's minimal-deps posture. Bound to a loopback address by default; reverse-proxy TLS termination is the documented path for remote access. There is no built-in TLS.
+
+- **`server.go`**: `Server`, `New`, `Run`, `Shutdown`, route registration. Each (layout, content) pair is parsed once at startup into its own `*template.Template` so the `{{define "content"}}` blocks across content files do not collide as they would in a single ParseFS-parsed set.
+- **`middleware.go`**: `requireAuth` (session lookup + CSRF check on non-safe methods), `requestLogger` (per-request structured log line; static-asset paths demoted to debug). CSRF is enforced on every `POST` / `PUT` / `DELETE` etc. via the `_csrf` form field compared against `Session.CSRFToken`.
+- **`handlers_auth.go`**: `GET/POST /admin/login`, `POST /admin/logout`. Login uses a separate short-lived `faultline_login_csrf` cookie because there is no session yet at that point; the cookie is rotated on every form render and cleared on successful login. Failed logins return a generic message and an HTTP 401, never disclosing whether the username existed.
+- **`assets/`**: vendored `htmx.min.js` (2.0.9), `tailwind.js` (`@tailwindcss/browser@4`, in-browser JIT), `daisyui.css` and `daisyui-themes.css` (5.5.19). All embedded via `go:embed`. Tailwind in the browser was chosen over a build-step CLI because the admin UI is low-traffic and avoiding a Node-flavored toolchain was an explicit requirement.
+- **`templates/`**: `layout.html`, `login.html`, `dashboard.html`. Embedded via `go:embed`.
+
+Composition wiring lives in `cmd/faultline/admin.go`. The admin server runs under the parent process context: first SIGINT closes `shutdownCh` (agent saves state) but the admin server stays up; second SIGINT cancels the parent context and the server shuts down. After the agent loop returns, `main.go` cancels the context explicitly so the admin server unblocks for clean exit.
+
+In stage 2 the admin server has no view of agent internals — that comes in stage 3+ via the `AgentInspector` / `SubagentInspector` / `ToolObserver` ports.
+
 ## Key Design Patterns
 
 1. **Hexagonal architecture (ports & adapters)**: see `Standards/Hexagonal-Architecture.md` in the user's vault. The agent depends only on interfaces it owns; adapters implement those interfaces structurally.
@@ -353,9 +382,10 @@ Self-update orchestration. Polls the configured GitHub repo's `releases/latest`,
 | `github.com/Mad-Pixels/goldmark-tgmd` | Markdown -> Telegram MarkdownV2 |
 | `github.com/BrianLeishman/go-imap` | IMAP client |
 | `golang.org/x/net/html` | HTML parsing for web_fetch |
+| `golang.org/x/crypto/argon2` | argon2id password hashing (admin UI auth) |
 | `github.com/yuin/goldmark` | Markdown (indirect, used by goldmark-tgmd) |
 
-The OpenAI-compatible chat completions client is hand-rolled in `internal/adapters/llm/openai/` (no SDK).
+The OpenAI-compatible chat completions client is hand-rolled in `internal/adapters/llm/openai/` (no SDK). The admin UI's HTMX, DaisyUI, and Tailwind-browser assets are vendored under `internal/adapters/admin/http/assets/` and embedded via `go:embed`; no Node toolchain is involved at build or run time.
 
 ## Runtime Dependencies
 
