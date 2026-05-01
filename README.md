@@ -2,7 +2,7 @@
 
 An autonomous AI agent daemon written in Go. Faultline runs as a persistent, long-lived process that continuously interacts with an LLM via an OpenAI-compatible API. It learns about the world by browsing the web, persists knowledge in a file-based memory system, communicates with a human collaborator via Telegram, and can execute Python scripts in a sandboxed Docker environment.
 
-The agent can modify its own operating prompts, enabling self-directed behavioral evolution over time.
+The agent can modify its own operating prompts, enabling self-directed behavioral evolution over time. With auto-update enabled, the daemon also keeps its own binary current — polling GitHub releases, verifying checksums, atomically swapping in new versions, and restarting cleanly. See [Auto-update](#auto-update) below.
 
 ## Requirements
 
@@ -30,6 +30,8 @@ sudo install faultline /usr/local/bin/        # or wherever you prefer
 ```
 
 The release tarball also contains `LICENSE`, `README.md`, `AGENTS.md`, and `config.example.toml`.
+
+Once installed, enable [Auto-update](#auto-update) and the daemon will pick up new releases automatically — no need to repeat this manual install for every version.
 
 ## Building from source
 
@@ -84,6 +86,24 @@ The agent runs continuously until interrupted. Shutdown behavior:
 
 Under a process supervisor (systemd, Docker, Kubernetes), the first signal is sufficient for clean rolling restarts.
 
+## Auto-update
+
+When `[update]` is enabled in `config.toml`, a background goroutine polls GitHub releases on a configured interval. If a newer version is available, the updater downloads the matching release tarball, verifies it against the published `SHA256SUMS`, atomically swaps the binary in place (keeping the old binary as `<binary>.previous` for one-deep rollback), and triggers graceful shutdown so the new binary takes over. Disabled by default; opt in with `enabled = true`.
+
+The LLM does not decide whether to update. The agent has `update_check`, `update_apply`, and `get_version` tools that kick off the same code path, so the operator can say "update yourself" via Telegram, but the actual decision logic is in code.
+
+Three restart modes — pick whichever matches how your deployment runs:
+
+| `restart_mode` | What happens after the swap | Use when |
+|----------------|------------------------------|----------|
+| `exit` *(default)* | Save state and `os.Exit(0)`. Supervisor respawns the unit. | systemd, Docker, Kubernetes, runit, supervisord — anything with `Restart=always`. |
+| `self-exec` | Save state and `syscall.Exec` the new binary, replacing the current process image. Same PID. | Bare-process runs without a supervisor (tmux, screen, manual `./faultline`). |
+| `command` | Save state, run a configured `restart_command` detached, exit. | Custom orchestrators. |
+
+On every successful update the agent appends an entry to `meta/version-history.md` in its memory store, so post-restart it can discover that it just updated by reading its own memory.
+
+See the `[update]` section in [`config.example.toml`](config.example.toml) for every knob.
+
 ## Features
 
 ### Persistent Memory
@@ -135,19 +155,6 @@ An optional Docker-based execution environment for Python scripts. Uses [`uv`](h
 ### IMAP Email (optional)
 
 When `[email]` is configured, the agent gets an `email_fetch` tool that opens a short-lived IMAP connection per call. Useful for letting the agent pick up things its operator emails to a dedicated inbox.
-
-### Self-update (optional)
-
-When `[update]` is enabled, a background goroutine polls GitHub releases on a configured interval. If a newer version is available, the updater downloads the matching release tarball, verifies it against the published `SHA256SUMS`, atomically swaps the binary in place (keeping the old binary as `<binary>.previous` for one-deep rollback), and triggers graceful shutdown so the new binary takes over.
-
-The LLM does not decide whether to update. The agent has `update_check` and `update_apply` tools that kick off the same code path, so the operator can say "update yourself" via Telegram, but the actual decision logic is in code.
-
-Three restart modes:
-- **`exit`** (default) — save state and exit. Suitable for any process supervisor that respawns the unit (systemd, Docker, Kubernetes, runit, supervisord).
-- **`self-exec`** — save state and `syscall.Exec` the new binary, replacing the process image. Same PID. Suitable for bare-process runs without a supervisor.
-- **`command`** — save state, run a configured restart command, exit. For custom orchestrators.
-
-Disabled by default. See `[update]` in `config.example.toml` for the full surface.
 
 ## Tools
 
