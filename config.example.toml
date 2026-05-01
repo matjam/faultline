@@ -100,18 +100,25 @@ level = "info"
 dir = "./logs"
 
 # ---------------------------------------------------------------------------
-# [sandbox] — Docker-backed Python execution.
+# [sandbox] — Docker-backed multi-runtime execution.
 #
-# When enabled, the agent gets sandbox_* tools for writing/executing Python
-# scripts in ephemeral Docker containers (one container per operation).
-# Requires Docker in PATH.
+# When enabled, the agent gets sandbox_* tools for writing/executing scripts
+# in ephemeral Docker containers (one container per operation). Requires
+# Docker in PATH.
+#
+# The default image is Faultline's own multi-runtime image (Arch-based;
+# ships uv/uvx, python+pip, node+npm+npx, bun, deno, go, plus common CLI
+# tools like curl, jq, ripgrep, fd, git). sandbox_execute drives Python
+# via uv; sandbox_shell can drive any of the other runtimes directly.
 # ---------------------------------------------------------------------------
 [sandbox]
 enabled = false
 
-# Image to run scripts in. The default is uv-on-Python-3.12 from astral.sh,
-# which is fast at installing packages.
-image = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+# Image to run scripts in. Pin to a versioned tag (e.g. :v1.4.0 or :v1)
+# instead of :latest if you want a specific image version locked down for
+# a deployment. The image is published from docker/sandbox/Dockerfile by
+# the sandbox-image GitHub Actions workflow.
+image = "ghcr.io/matjam/faultline-sandbox:latest"
 
 # Sandbox working directory on the host. Mapped into the container as the
 # script's CWD. Three subdirs are auto-created: scripts/, input/, output/.
