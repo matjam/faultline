@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/matjam/faultline/compare/v1.3.0...v1.4.0) (2026-05-01)
+
+
+### Features
+
+* custom Arch-based multi-runtime sandbox image ([#23](https://github.com/matjam/faultline/issues/23)) ([41bee48](https://github.com/matjam/faultline/commit/41bee48f1bd97c14e76ea5acdc3a97bc3186667d))
+
+
+### Bug Fixes
+
+* shutdown handling and reconcile observability ([#21](https://github.com/matjam/faultline/issues/21)) ([81cc3b6](https://github.com/matjam/faultline/commit/81cc3b6e3d147c122cd06f5072e310a561406ea7))
+
 ## [1.3.0](https://github.com/matjam/faultline/compare/v1.2.0...v1.3.0) (2026-05-01)
 
 
