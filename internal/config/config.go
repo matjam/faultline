@@ -253,6 +253,14 @@ type SkillsConfig struct {
 	// "./skills". Created lazily by the operator; a missing directory
 	// is not an error -- the catalog stays empty until skills appear.
 	Dir string `toml:"dir"`
+
+	// InstallEnabled gates the skill_install tool. When false (the
+	// default), the agent cannot install skills autonomously and the
+	// tool is not advertised at all. When true, the agent can fetch
+	// skills from tarball URLs or git repositories into Dir; this
+	// gives the agent significant filesystem and network capability,
+	// so opt in deliberately.
+	InstallEnabled bool `toml:"install_enabled"`
 }
 
 // Active reports whether skills support is wired up. Mirrors the

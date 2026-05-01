@@ -25,16 +25,30 @@ func (te *Executor) skillsAvailable() bool {
 	return te.skills != nil && len(te.skills.List()) > 0
 }
 
-// skillToolDefs returns the skill_* tool definitions when at least one
-// skill is registered. Returns an empty slice otherwise so the caller
-// can append unconditionally without checking.
+// skillToolDefs returns the skill_* tool definitions when skills are
+// configured. The activate/read/execute/work_read tools require at
+// least one skill to be in the catalog (an empty skill_activate
+// surface confuses the model per the spec). skill_install -- when
+// enabled -- is advertised even with an empty catalog so the agent
+// can bootstrap the first skill.
 //
-// The `name` parameter is constrained to the current set of skill
-// names via an enum, so the model can't hallucinate a non-existent
-// skill -- per the agentskills.io implementation guidance.
+// The `name` parameter on activate/read/execute is constrained to the
+// current set of skill names via an enum, so the model can't
+// hallucinate a non-existent skill -- per the agentskills.io
+// implementation guidance.
 func (te *Executor) skillToolDefs() []llm.Tool {
+	var defs []llm.Tool
+
+	// skill_install can be advertised independently of the catalog
+	// being non-empty, so the agent can install the first skill
+	// from a fresh deployment. Still gated on Skills being
+	// configured at all.
+	if te.skills != nil && te.skillInstallEnabled {
+		defs = append(defs, te.skillInstallToolDef())
+	}
+
 	if !te.skillsAvailable() {
-		return nil
+		return defs
 	}
 
 	names := make([]string, 0)
@@ -49,7 +63,7 @@ func (te *Executor) skillToolDefs() []llm.Tool {
 		"enum":        names,
 	}
 
-	return []llm.Tool{
+	defs = append(defs, []llm.Tool{
 		{
 			Type: llm.ToolTypeFunction,
 			Function: &llm.FunctionDef{
@@ -125,7 +139,8 @@ func (te *Executor) skillToolDefs() []llm.Tool {
 				},
 			},
 		},
-	}
+	}...)
+	return defs
 }
 
 // skillActivate returns the SKILL.md body (frontmatter already

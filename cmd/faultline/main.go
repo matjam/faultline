@@ -258,7 +258,7 @@ func main() {
 	}
 
 	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex,
-		skillStore,
+		skillStore, cfg.Skills.InstallEnabled,
 		cfg.Embeddings.BatchSize, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool

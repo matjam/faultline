@@ -299,3 +299,17 @@ enabled = false
 # <dir>/pdf-processing/SKILL.md. A missing directory is not an error -- the
 # catalog stays empty until the operator drops skills in.
 dir = "./skills"
+
+# Allow the agent to install new skills autonomously via the
+# skill_install tool. When false (the default), skill_install is not
+# advertised at all and the operator must drop skills into Dir manually.
+# When true, the agent can fetch skills from tarball URLs (.tar.gz, .tgz,
+# .tar, .zip) or git repositories (.git URLs, git@ URLs, git+https://, or
+# plain GitHub repo URLs) into Dir. The download is extracted to a temp
+# directory, validated (must contain a SKILL.md that parses cleanly),
+# then moved into the skills root. Existing skills are NOT overwritten.
+# Caps: 50 MiB max download, 5 min total timeout, path-traversal guards
+# on archive entries. Even with this on, the agent's reach is bounded by
+# the standard sandbox feature -- skill_execute still runs every script
+# in an isolated container with only the skill's own directory mounted.
+install_enabled = false

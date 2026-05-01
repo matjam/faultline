@@ -200,6 +200,18 @@ func loadSkill(raw []byte, dir, mdPath, dirName string) (*skills.Skill, error) {
 	return sk, nil
 }
 
+// LoadSkillForValidation parses a SKILL.md as if it were being added
+// to the catalog and returns the populated Skill. Exposed for the
+// install-time pre-flight check in the tools layer so a malformed
+// skill is rejected before being moved into the live skills root.
+//
+// The same rules apply as during normal Reload(): missing frontmatter
+// or description is a hard error; lenient issues land in
+// skill.Diagnostics rather than failing the load.
+func LoadSkillForValidation(raw []byte, dir, mdPath, dirName string) (*skills.Skill, error) {
+	return loadSkill(raw, dir, mdPath, dirName)
+}
+
 // List returns all skills in the catalog, ordered by name. The
 // returned slice is a copy of the underlying records; mutating it does
 // not affect the store.
