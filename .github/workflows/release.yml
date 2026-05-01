@@ -3,22 +3,16 @@ name: Release
 # Builds binaries for a tag and attaches them to the matching GitHub
 # release. Two ways this gets triggered:
 #
-#   1. Automatically on tag push (vX.Y.Z) -- the desired path.
+#   1. Automatically on tag push (vX.Y.Z) -- the normal path.
+#      release-please.yml uses RELEASE_PLEASE_TOKEN (a fine-grained PAT)
+#      to push tags so this workflow fires on tag-push events.
 #
-#      CAVEAT: tag pushes performed by release-please-action using the
-#      default GITHUB_TOKEN do NOT trigger this workflow. GitHub
-#      deliberately suppresses workflow-from-workflow chains when the
-#      pushing identity is GITHUB_TOKEN, to prevent infinite loops. To
-#      get fully automatic releases, configure release-please.yml to
-#      use a PAT instead of GITHUB_TOKEN; PAT-pushed tags do trigger
-#      downstream workflows.
-#
-#   2. Manually via workflow_dispatch (the workaround). Pick the tag
-#      from the dropdown when running the workflow. Useful when (1)
-#      didn't fire because release-please pushed the tag.
-#
-# Once we adopt a PAT in release-please.yml, the manual path becomes
-# vestigial, but harmless to keep around.
+#   2. Manually via workflow_dispatch -- the backup path. Pick the tag
+#      from the input field when running the workflow. Useful for
+#      retrying a failed release build, or backfilling a tag whose
+#      auto-trigger was suppressed (e.g. before the PAT was configured,
+#      tags pushed via the default GITHUB_TOKEN didn't trigger the
+#      workflow).
 
 on:
   push:

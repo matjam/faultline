@@ -22,5 +22,15 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # Push tags using a Personal Access Token rather than the
+          # default GITHUB_TOKEN. GitHub deliberately suppresses
+          # workflow-from-workflow chains when the pushing identity is
+          # GITHUB_TOKEN, which would prevent the release workflow from
+          # firing on tag push. PAT-pushed tags trigger downstream
+          # workflows normally.
+          #
+          # The token must be a fine-grained PAT scoped to this repo
+          # with: Contents (Read+Write), Pull requests (Read+Write).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
