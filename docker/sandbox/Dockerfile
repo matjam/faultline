@@ -97,6 +97,27 @@ ENV UV_CACHE_DIR=/cache \
     UV_PROJECT_ENVIRONMENT=/venv \
     PATH=/usr/local/bin:/usr/bin:/bin
 
+# ---------------------------------------------------------------------------
+# Defense-in-depth: bake in a non-root default USER.
+#
+# The Go side ALWAYS passes --user <host_uid>:<host_gid> on every
+# `docker run`, so this directive is overridden in normal operation and
+# the container actually runs as the unprivileged host user. The USER
+# directive matters only when --user is somehow not passed (a future
+# bug, an ad-hoc operator `docker run` without the flag, etc.); in that
+# case we want the image to refuse to be root rather than silently fall
+# back to it.
+#
+# UID 65532 is the conventional "nonroot" UID (used by Distroless and
+# others). Far from typical host UIDs (0-1999) so collisions with any
+# operator running faultline as their normal account are unlikely. The
+# user has no shell and a nonexistent home dir on purpose -- there is
+# no scenario where the sandbox should be able to log in or persist
+# state.
+# ---------------------------------------------------------------------------
+RUN useradd -r -u 65532 -s /sbin/nologin -d /nonexistent sandbox
+USER 65532:65532
+
 WORKDIR /
 
 # The sandbox always passes its own command to `docker run` (e.g.
