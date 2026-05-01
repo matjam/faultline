@@ -40,13 +40,13 @@ func newFragmentsTestServer(t *testing.T,
 	sub SubagentInspector,
 	buf *ToolBuffer,
 ) *testServer {
-	return newAdminTestServer(t, ag, sub, buf, nil)
+	return newAdminTestServer(t, ag, sub, buf, nil, nil)
 }
 
 // newSkillsAdminWiredServer is the skills-test variant: nil agent &
 // subagent inspectors, real tool buffer, real SkillsAdmin.
 func newSkillsAdminWiredServer(t *testing.T, sk SkillsAdmin) *testServer {
-	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), sk)
+	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), sk, nil)
 }
 
 // newAdminTestServer is the most general builder; the helpers above
@@ -56,6 +56,7 @@ func newAdminTestServer(t *testing.T,
 	sub SubagentInspector,
 	buf *ToolBuffer,
 	sk SkillsAdmin,
+	upd UpdateInspector,
 ) *testServer {
 	t.Helper()
 	dir := t.TempDir()
@@ -83,6 +84,7 @@ func newAdminTestServer(t *testing.T,
 		Subagents: sub,
 		Tools:     buf,
 		Skills:    sk,
+		Update:    upd,
 	})
 	if err != nil {
 		t.Fatalf("adminhttp.New: %v", err)

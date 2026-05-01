@@ -412,6 +412,12 @@ func main() {
 		if skillStore != nil {
 			adminSrv.AttachSkills(skillStore)
 		}
+		// Self-update inspector: always wired when admin is on.
+		// The updater itself is harmless when [update] is
+		// disabled — Apply refuses, State() returns the cached
+		// (mostly empty) state, and the UI surfaces "auto-update
+		// off".
+		adminSrv.AttachUpdater(updater)
 		adminSrv.Start(ctx)
 	}
 

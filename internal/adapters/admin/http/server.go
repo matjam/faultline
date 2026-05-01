@@ -68,6 +68,11 @@ type Deps struct {
 	// Skills is the read+write port for the Skills page.
 	// nil-allowed (skills feature off, or stage 5 not yet wired).
 	Skills SkillsAdmin
+
+	// Update is the read+write port for the self-update pane.
+	// nil-allowed: when not set, the Update card renders a
+	// "updater not wired" placeholder.
+	Update UpdateInspector
 }
 
 // Server is the HTTP admin UI server. Construct with New, run with
@@ -105,6 +110,7 @@ var fragmentTemplates = []string{
 	"frag_tools.html",
 	"frag_subagents.html",
 	"frag_skills.html",
+	"frag_update.html",
 }
 
 // New parses templates and prepares the static-file sub-FS. Returns
@@ -232,6 +238,15 @@ func (s *Server) SetSkillsAdmin(sk SkillsAdmin) {
 	s.deps.Skills = sk
 }
 
+// SetUpdateInspector wires the self-update read+write port. The
+// updater is always constructed in main.go (it serves the
+// get_version tool even when self-update is disabled), so this is
+// usually called even when cfg.Update.Enabled is false; the pane
+// renders a "auto-update off" view in that case.
+func (s *Server) SetUpdateInspector(u UpdateInspector) {
+	s.deps.Update = u
+}
+
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
 		if s.srv == nil {
@@ -266,10 +281,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/fragments/tools", s.requireAuth(s.handleFragTools))
 	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
 	mux.HandleFunc("GET /admin/fragments/skills", s.requireAuth(s.handleFragSkills))
+	mux.HandleFunc("GET /admin/fragments/update", s.requireAuth(s.handleFragUpdate))
 
 	// Skills toggle action. Re-renders the skills fragment so
 	// HTMX can hx-swap the updated card without a full page load.
 	mux.HandleFunc("POST /admin/skills/toggle", s.requireAuth(s.handleSkillsToggle))
+
+	// Update actions. /apply triggers a destructive update and
+	// graceful shutdown; the response body is the new card with
+	// a flash explaining what happened, but the browser will
+	// likely lose the connection mid-shutdown — that's fine.
+	mux.HandleFunc("POST /admin/update/apply", s.requireAuth(s.handleUpdateApply))
 
 	// Anything not under /admin gets 404. We intentionally don't
 	// take over /; the agent doesn't expose anything else on this
