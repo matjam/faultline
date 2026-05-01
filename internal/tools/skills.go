@@ -298,12 +298,10 @@ func (te *Executor) skillExecute(ctx context.Context, args string) string {
 	if output == "" {
 		sb.WriteString("(no stdout/stderr)\n\n")
 	} else {
-		sb.WriteString("Output:\n")
-		sb.WriteString(output)
-		if !strings.HasSuffix(output, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
+		// Skill stdout/stderr can include data the skill fetched
+		// from the network; treat as untrusted.
+		sb.WriteString(wrapUntrusted(fmt.Sprintf("skill %s stdout/stderr", p.Name), output))
+		sb.WriteString("\n\n")
 	}
 	if len(manifest) == 0 {
 		sb.WriteString("/work is empty; the skill produced no files.\n")
@@ -361,7 +359,11 @@ func (te *Executor) skillWorkRead(args string) string {
 	if te.sandbox != nil {
 		out = te.sandbox.Truncate(out, "File too large for one read; rerun the skill with output split or written in chunks.")
 	}
-	return out
+	// Skill code can write network-fetched content into /work files;
+	// the byte-level content is untrusted even when the path is
+	// operator-validated.
+	source := fmt.Sprintf("skill /work file: %s (work_id=%s)", p.Path, p.WorkID)
+	return wrapUntrusted(source, out)
 }
 
 // workManifestEntry is one entry in the post-execute /work listing.

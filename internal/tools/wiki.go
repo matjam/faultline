@@ -150,5 +150,8 @@ func (te *Executor) wikiFetch(argsJSON string) string {
 		header += fmt.Sprintf(" [use offset=%d to continue]", endPos)
 	}
 
-	return header + "\n\n" + text
+	// The position metadata above is our trusted text; the article
+	// body below it is not. Wrap only the body.
+	source := fmt.Sprintf("Wikipedia: %s", args.Title)
+	return header + "\n\n" + wrapUntrusted(source, text)
 }

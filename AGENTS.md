@@ -22,10 +22,19 @@ faultline/
     config/                   TOML config loading
     log/                      DailyFileWriter, MultiHandler (slog)
     prompts/                  embedded prompt templates, Load, LoadAll,
-                              Render, BuildCycleContext
+                              Render, BuildCycleContext, plus the
+                              prompt-migrations subsystem (LoadMigrations,
+                              LoadAppliedMigrations, PendingMigrations,
+                              RecordMigrationApplied)
       templates/              the embedded *.md defaults
+        migrations/           one-shot prompt-update instructions
+                              (NNN_slug.md) shipped with releases
     tools/                    tool registry & dispatcher
       executor.go             Executor + all tool handlers
+      untrusted.go            wrapUntrusted helper for tool output
+                              that contains content not under our
+                              control (web pages, sandbox stdout,
+                              email bodies, etc.)
       vector.go               Embedder interface + per-mutation reindex helpers
       wiki.go                 wiki_fetch tool
       html_test.go            HTML-to-markdown converter tests
@@ -196,6 +205,7 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
 - `prompts.Render(template, now)`: substitutes `{{TIME}}` placeholders.
 - `prompts.BuildCycleContext(systemPrompt, memories, now, charLimit)`: assembles the full system message with recent memory excerpts and truncation hints.
 - `prompts.Store` is a tiny interface (Read/Write) that `*fs.Store` satisfies structurally, so the prompts package doesn't import the memory adapter.
+- **Prompt migrations** (`migrations.go`, `templates/migrations/NNN_slug.md`): shipped one-shot instructions that update operator-owned mutable prompt files in place. Files like `000_add_untrusted_content_convention.md` are embedded via `go:embed all:templates/migrations`. `LoadMigrations` parses the filename pattern (`\d+_slug.md`), `LoadAppliedMigrations` reads the runtime-maintained record at `prompts/migrations.md` (Markdown with `## Applied` section, lines like `- 000 slug 2026-05-01T12:00:00Z [optional note]`), `PendingMigrations` diffs the two, and `RecordMigrationApplied` appends a record line. The agent runner (`internal/agent/migrations.go`) executes each pending migration as a short bounded sub-loop with the agent's normal Chat + Tools surface; the LLM applies the requested edits via `memory_edit` / `memory_insert` etc. and signals completion with a text-only response. Migrations must be idempotent (the body checks current state before editing). After all pending migrations run, the runner reloads prompts and rebuilds the in-place system message so the resumed conversation continues with the updated system prompt at index 0.
 
 ### internal/tools/
 

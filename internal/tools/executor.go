@@ -1341,7 +1341,10 @@ func (te *Executor) sandboxShell(ctx context.Context, argsJSON string) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return output
+	// stdout/stderr is whatever the (potentially network-fetching)
+	// command produced; treat it as untrusted even though the
+	// command itself was issued by the agent.
+	return wrapUntrusted(fmt.Sprintf("sandbox_shell: %s", args.Command), output)
 }
 
 func (te *Executor) webFetch(argsJSON string) string {
@@ -1437,7 +1440,9 @@ func (te *Executor) webFetch(argsJSON string) string {
 		header += fmt.Sprintf(" [use offset=%d to continue]", endPos)
 	}
 
-	return header + "\n\n" + text
+	// The position metadata above is our trusted text; the page
+	// body below it is not. Wrap only the body.
+	return header + "\n\n" + wrapUntrusted(args.URL, text)
 }
 
 func (te *Executor) memoryRead(argsJSON string) string {
@@ -2071,14 +2076,18 @@ func (te *Executor) emailFetch(argsJSON string) string {
 		if err != nil {
 			return fmt.Sprintf("Error: %s", err)
 		}
-		return body
+		// Email body is fully attacker-controllable.
+		source := fmt.Sprintf("email %s UID %d body", args.Folder, args.UID)
+		return wrapUntrusted(source, body)
 	}
 
 	result, err := c.FetchOverviews(args.Folder, args.Limit)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return result
+	// Subject + From + dates in overviews are also attacker-controllable.
+	source := fmt.Sprintf("email %s overviews (limit %d)", args.Folder, args.Limit)
+	return wrapUntrusted(source, result)
 }
 
 func (te *Executor) sendMessage(argsJSON string) string {
@@ -2536,7 +2545,9 @@ func (te *Executor) sandboxExecute(ctx context.Context, argsJSON string) string 
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return output
+	// Script output may include data the script fetched from the
+	// network; treat it as untrusted.
+	return wrapUntrusted(fmt.Sprintf("sandbox_execute: %s", args.Script), output)
 }
 
 func (te *Executor) sandboxInstallPackage(ctx context.Context, argsJSON string) string {
@@ -2553,7 +2564,9 @@ func (te *Executor) sandboxInstallPackage(ctx context.Context, argsJSON string) 
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return fmt.Sprintf("Package installed successfully.\n%s", output)
+	// uv output contains package metadata fetched from PyPI; wrap.
+	return "Package installed successfully.\n" +
+		wrapUntrusted(fmt.Sprintf("uv install: %s", args.Package), output)
 }
 
 func (te *Executor) sandboxUpgradePackage(ctx context.Context, argsJSON string) string {
