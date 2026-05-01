@@ -257,14 +257,37 @@ func main() {
 		logger.Info("skills not configured, skill_* tools disabled")
 	}
 
-	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex,
-		skillStore, cfg.Skills.InstallEnabled,
-		cfg.Embeddings.BatchSize, logger,
-		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
+	// Shared web cache is owned by the composition root, not the
+	// Executor. With subagents enabled, multiple Executors (primary +
+	// children) share one cache; a child's Close must not yank it out
+	// from under the primary, so the cache lifecycle lives here.
+	webCache := tools.NewWebCache(60 * time.Second)
+	defer webCache.Close()
+
+	toolExec := tools.New(tools.Deps{
+		Mode:                tools.ModePrimary,
+		Memory:              memory,
+		Index:               index,
+		VectorIndex:         vIndex,
+		Telegram:            tg,
+		Sandbox:             sb,
+		Email:               email,
+		Kobold:              kb,
+		Updater:             updater,
+		Embedder:            embedder,
+		Skills:              skillStore,
+		SkillInstallEnabled: cfg.Skills.InstallEnabled,
+		EmbedBatchSize:      cfg.Embeddings.BatchSize,
+		Logger:              logger,
+		WebCache:            webCache,
+		MaxTokens:           cfg.Agent.MaxTokens,
+		Limits:              cfg.Limits,
+		MaxSleep:            cfg.Agent.MaxSleep.Duration(),
+	})
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
 	// executor's lifecycle via the Tools port; agent.Close() (deferred
-	// below) calls tools.Close() exactly once. A second defer here was
-	// previously closing webCache.stop twice and panicking on shutdown.
+	// below) calls tools.Close() exactly once. The shared webCache has
+	// its own defer above.
 
 	state := jsonfile.NewPersister(cfg.Agent.StateFile, logger)
 

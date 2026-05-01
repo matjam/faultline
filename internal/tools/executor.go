@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -71,86 +70,53 @@ func lineCount(s string) int {
 	return n
 }
 
-// webCacheEntry holds a cached web page fetch result.
-type webCacheEntry struct {
-	content   string
-	fetchedAt time.Time
-}
+// Mode controls which tools an Executor advertises and accepts. The
+// primary agent runs in ModePrimary; child agents spawned via the
+// subagent_* tools run in ModeSubagent and have a reduced surface
+// (no sleep, no update_*, no nested subagent_*).
+type Mode int
 
-// webCache is a TTL cache for web_fetch results with proactive eviction.
-type webCache struct {
-	mu        sync.Mutex
-	entries   map[string]webCacheEntry
-	ttl       time.Duration
-	stop      chan struct{}
-	closeOnce sync.Once
-}
+const (
+	// ModePrimary is the default: full tool surface.
+	ModePrimary Mode = iota
 
-func newWebCache(ttl time.Duration) *webCache {
-	c := &webCache{
-		entries: make(map[string]webCacheEntry),
-		ttl:     ttl,
-		stop:    make(chan struct{}),
-	}
-	go c.evictLoop()
-	return c
-}
+	// ModeSubagent strips operator-style and process-management tools
+	// that don't make sense for a child loop:
+	//   - sleep (subagents have no operator queue to wake them)
+	//   - update_check / update_apply (process management is the
+	//     primary's job)
+	//   - subagent_run / subagent_spawn / subagent_status /
+	//     subagent_cancel (no nesting)
+	//
+	// Subagents retain everything else, including send_message,
+	// memory_*, sandbox_*, and skill_* — the user explicitly opted to
+	// keep send_message so a deep-research subagent can ping the
+	// operator on completion.
+	ModeSubagent
+)
 
-// Close stops the background eviction goroutine. Idempotent: safe to
-// call more than once. The Tools port doc declares Close as the
-// agent's responsibility, but a defensive sync.Once guards against any
-// future caller (or doubled-up defer in the composition root) closing
-// the channel twice and panicking.
-func (c *webCache) Close() {
-	c.closeOnce.Do(func() {
-		close(c.stop)
-	})
-}
-
-// evictLoop periodically removes expired entries.
-func (c *webCache) evictLoop() {
-	ticker := time.NewTicker(c.ttl / 2)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.stop:
-			return
-		case <-ticker.C:
-			c.evict()
-		}
+// String returns "primary" or "subagent" for log fields.
+func (m Mode) String() string {
+	switch m {
+	case ModeSubagent:
+		return "subagent"
+	default:
+		return "primary"
 	}
 }
 
-func (c *webCache) evict() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	for url, entry := range c.entries {
-		if now.Sub(entry.fetchedAt) > c.ttl {
-			delete(c.entries, url)
-		}
-	}
-}
-
-// Get returns cached content and true if the entry exists and hasn't expired.
-func (c *webCache) Get(url string) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	entry, ok := c.entries[url]
-	if !ok || time.Since(entry.fetchedAt) > c.ttl {
-		if ok {
-			delete(c.entries, url)
-		}
-		return "", false
-	}
-	return entry.content, true
-}
-
-// Set stores content for a URL.
-func (c *webCache) Set(url, content string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[url] = webCacheEntry{content: content, fetchedAt: time.Now()}
+// subagentForbidden is the deny list applied when Mode == ModeSubagent.
+// Used for both ToolDefs filtering (advertise nothing the child can't
+// call) and Execute defensive rejection (reject calls anyway, in case
+// a flaky LLM hallucinates one).
+var subagentForbidden = map[string]struct{}{
+	"sleep":           {},
+	"update_check":    {},
+	"update_apply":    {},
+	"subagent_run":    {},
+	"subagent_spawn":  {},
+	"subagent_status": {},
+	"subagent_cancel": {},
 }
 
 // ToolDefs returns the tool definitions for the OpenAI API.
@@ -961,6 +927,24 @@ func (te *Executor) ToolDefs() []llm.Tool {
 		tools = append(tools, defs...)
 	}
 
+	// Mode-based filtering: drop tools subagents are not allowed to
+	// call. Applied at the end so the rest of ToolDefs() doesn't have
+	// to be branchy on mode.
+	if te.mode == ModeSubagent {
+		filtered := tools[:0]
+		for _, t := range tools {
+			if t.Function == nil {
+				filtered = append(filtered, t)
+				continue
+			}
+			if _, banned := subagentForbidden[t.Function.Name]; banned {
+				continue
+			}
+			filtered = append(filtered, t)
+		}
+		tools = filtered
+	}
+
 	return tools
 }
 
@@ -978,6 +962,7 @@ func indexKey(path string) string {
 
 // Executor handles executing tool calls.
 type Executor struct {
+	mode                Mode
 	memory              *fs.Store
 	index               *bm25.Index
 	telegram            *telegram.Bot
@@ -993,51 +978,93 @@ type Executor struct {
 	embedBatchSize      int             // batch size for bulk embed calls (rebuild_indexes); 0 -> default
 	logger              *slog.Logger
 	http                *http.Client
-	cache               *webCache
+	cache               *WebCache // borrowed from composition root; not closed here
 	maxTokens           int
 	currentTokens       int
 	limits              config.LimitsConfig
 	maxSleep            time.Duration // upper bound for the `sleep` tool
 }
 
-// New creates a new tool executor. kb, embedder, vIndex, and skills may
-// be nil. embedder and vIndex must be both nil (feature off) or both
+// Deps bundles the dependencies an Executor needs. Each Executor
+// instance owns very little state of its own (currentTokens, the http
+// client); everything else is borrowed from the composition root.
+//
+// Multiple Executor instances coexist when subagent support is
+// enabled: the primary agent's Executor (Mode = ModePrimary) and one
+// Executor per active subagent (Mode = ModeSubagent). All instances
+// share the WebCache, Memory, Index, VectorIndex, Sandbox, Telegram,
+// Updater, Embedder, and Skills pointers; per-instance fields like
+// CurrentTokens are not shared.
+//
+// Embedder and VectorIndex must be both nil (feature off) or both
 // non-nil (feature on); main.go is responsible for that pairing.
+type Deps struct {
+	Mode                Mode
+	Memory              *fs.Store
+	Index               *bm25.Index
+	VectorIndex         *vector.Index
+	Telegram            *telegram.Bot
+	Sandbox             *docker.Sandbox
+	Email               *config.EmailConfig
+	Kobold              *kobold.Client
+	Updater             *update.Updater
+	Embedder            Embedder
+	Skills              *skillsfs.Store
+	SkillInstallEnabled bool
+	EmbedBatchSize      int
+	Logger              *slog.Logger
+	WebCache            *WebCache
+	MaxTokens           int
+	Limits              config.LimitsConfig
+	MaxSleep            time.Duration
+}
+
+// New creates a new tool executor.
 //
-// embedBatchSize is the batch size used by the rebuild_indexes tool;
-// values <= 0 fall back to a sensible default inside the build helper.
-//
-// skillInstallEnabled gates the skill_install tool. When skills is nil
-// it has no effect; when both skills and skillInstallEnabled are set
-// the tool is advertised and the agent can fetch skills from tarball
-// URLs or git repositories.
-func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, skills *skillsfs.Store, skillInstallEnabled bool, embedBatchSize int, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
-	if sb != nil {
-		sb.SetOutputLimit(limits.SandboxOutputChars)
+// The Sandbox output cap is applied as a side effect when Sandbox is
+// non-nil; subagent Executors share the parent's Sandbox and therefore
+// inherit the same cap (the per-call SetOutputLimit is idempotent so
+// this is safe even if called repeatedly).
+func New(deps Deps) *Executor {
+	if deps.Logger == nil {
+		deps.Logger = slog.Default()
+	}
+	if deps.WebCache == nil {
+		// Defensive: if a caller forgets to construct a shared cache,
+		// give this Executor its own. The caller is responsible for
+		// Close in that case (the Executor's Close does NOT touch the
+		// cache because in the normal multi-Executor case the cache is
+		// shared and a child Close would yank it out from under the
+		// primary).
+		deps.WebCache = NewWebCache(60 * time.Second)
+	}
+	if deps.Sandbox != nil {
+		deps.Sandbox.SetOutputLimit(deps.Limits.SandboxOutputChars)
 	}
 	skillsRoot := ""
-	if skills != nil {
-		skillsRoot = skills.Root()
+	if deps.Skills != nil {
+		skillsRoot = deps.Skills.Root()
 	}
 	return &Executor{
-		memory:              memory,
-		index:               index,
-		telegram:            tg,
-		sandbox:             sb,
-		email:               email,
-		kobold:              kb,
-		updater:             updater,
-		embedder:            embedder,
-		vIndex:              vIndex,
-		skills:              skills,
-		skillInstallEnabled: skillInstallEnabled,
+		mode:                deps.Mode,
+		memory:              deps.Memory,
+		index:               deps.Index,
+		telegram:            deps.Telegram,
+		sandbox:             deps.Sandbox,
+		email:               deps.Email,
+		kobold:              deps.Kobold,
+		updater:             deps.Updater,
+		embedder:            deps.Embedder,
+		vIndex:              deps.VectorIndex,
+		skills:              deps.Skills,
+		skillInstallEnabled: deps.SkillInstallEnabled,
 		skillsRoot:          skillsRoot,
-		embedBatchSize:      embedBatchSize,
-		logger:              logger,
-		maxTokens:           maxTokens,
-		limits:              limits,
-		maxSleep:            maxSleep,
-		cache:               newWebCache(60 * time.Second),
+		embedBatchSize:      deps.EmbedBatchSize,
+		logger:              deps.Logger,
+		maxTokens:           deps.MaxTokens,
+		limits:              deps.Limits,
+		maxSleep:            deps.MaxSleep,
+		cache:               deps.WebCache,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -1049,10 +1076,12 @@ func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandb
 	}
 }
 
-// Close releases resources held by the tool executor.
-func (te *Executor) Close() {
-	te.cache.Close()
-}
+// Close is a no-op in the current implementation. The shared WebCache
+// is owned by the composition root, not the Executor, because multiple
+// Executor instances (primary + subagents) share one cache and a
+// child's Close must not stop it. Kept on the Tools port surface as a
+// future hook for per-Executor cleanup.
+func (te *Executor) Close() {}
 
 // reindexDir re-indexes all .md files under a memory directory path.
 // Used after directory-level operations (delete, move, restore) to keep the
@@ -1087,7 +1116,16 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
-	te.logger.Info("tool call", "name", name, "args_len", len(args))
+	te.logger.Info("tool call", "name", name, "args_len", len(args), "mode", te.mode.String())
+
+	// Defensive surface check: ToolDefs already strips these for
+	// subagents, but a flaky LLM may hallucinate a tool name. Reject
+	// with a useful error rather than dispatching.
+	if te.mode == ModeSubagent {
+		if _, banned := subagentForbidden[name]; banned {
+			return fmt.Sprintf("Tool %q is not available to subagents.", name)
+		}
+	}
 
 	switch name {
 	case "web_fetch":

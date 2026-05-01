@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	skillsfs "github.com/matjam/faultline/internal/adapters/skills/fs"
-	"github.com/matjam/faultline/internal/config"
 )
 
 // silentTestLogger discards all log output so tests don't pollute the run.
@@ -184,10 +183,11 @@ func TestSkillInstall_Tarball(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := New(nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		store, true, // install enabled
-		0, silentTestLogger(),
-		0, config.LimitsConfig{}, 0)
+	te := New(Deps{
+		Skills:              store,
+		SkillInstallEnabled: true,
+		Logger:              silentTestLogger(),
+	})
 
 	args := `{"source":"` + srv.URL + `/my-skill.tar.gz","name":"my-skill"}`
 	got := te.skillInstall(context.Background(), args)
@@ -211,10 +211,11 @@ func TestSkillInstall_RejectsExisting(t *testing.T) {
 		[]byte("---\nname: duplicate\ndescription: x.\n---\n"), 0o644)
 
 	store, _ := skillsfs.New(skillsRoot, silentTestLogger())
-	te := New(nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		store, true,
-		0, silentTestLogger(),
-		0, config.LimitsConfig{}, 0)
+	te := New(Deps{
+		Skills:              store,
+		SkillInstallEnabled: true,
+		Logger:              silentTestLogger(),
+	})
 
 	args := `{"source":"https://example.com/duplicate.tar.gz","name":"duplicate"}`
 	got := te.skillInstall(context.Background(), args)
@@ -227,10 +228,11 @@ func TestSkillInstall_DisabledByDefault(t *testing.T) {
 	skillsRoot := t.TempDir()
 	store, _ := skillsfs.New(skillsRoot, silentTestLogger())
 	// install_enabled = false
-	te := New(nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		store, false,
-		0, silentTestLogger(),
-		0, config.LimitsConfig{}, 0)
+	te := New(Deps{
+		Skills:              store,
+		SkillInstallEnabled: false,
+		Logger:              silentTestLogger(),
+	})
 
 	args := `{"source":"https://example.com/x.tar.gz"}`
 	got := te.skillInstall(context.Background(), args)
@@ -249,10 +251,11 @@ func TestSkillInstall_DisabledByDefault(t *testing.T) {
 func TestSkillInstall_RejectsInvalidName(t *testing.T) {
 	skillsRoot := t.TempDir()
 	store, _ := skillsfs.New(skillsRoot, silentTestLogger())
-	te := New(nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		store, true,
-		0, silentTestLogger(),
-		0, config.LimitsConfig{}, 0)
+	te := New(Deps{
+		Skills:              store,
+		SkillInstallEnabled: true,
+		Logger:              silentTestLogger(),
+	})
 
 	// "Bad_Name" sanitizes to "bad-name" via inferSkillName, which is
 	// fine -- we use an explicit name with capitals to force the
