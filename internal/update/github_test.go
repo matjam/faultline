@@ -2,9 +2,12 @@ package update
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestLatest_FiltersDraft(t *testing.T) {
@@ -75,6 +78,67 @@ func TestRelease_FindAsset(t *testing.T) {
 	}
 	if a := r.FindAsset("missing"); a != nil {
 		t.Errorf("expected nil for missing asset, got %+v", a)
+	}
+}
+
+func TestLatest_RateLimited(t *testing.T) {
+	resetAt := time.Now().Add(45 * time.Minute).Unix()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "60")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	}))
+	defer srv.Close()
+
+	c := newGitHubClient("o/r")
+	c.apiBase = srv.URL
+	_, err := c.Latest(context.Background(), false)
+	if err == nil {
+		t.Fatal("expected rate limit error")
+	}
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected *RateLimitError, got %T: %v", err, err)
+	}
+	if rle.ResetAt.Unix() != resetAt {
+		t.Errorf("ResetAt = %d, want %d", rle.ResetAt.Unix(), resetAt)
+	}
+}
+
+func TestLatest_403WithoutRateLimitHeadersIsGenericError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 403 with no X-RateLimit-* headers (e.g. permission error,
+		// not a rate-limit) must NOT be classified as a rate-limit
+		// error -- otherwise we'd back off for hours on a benign
+		// permission glitch.
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Forbidden"}`))
+	}))
+	defer srv.Close()
+
+	c := newGitHubClient("o/r")
+	c.apiBase = srv.URL
+	_, err := c.Latest(context.Background(), false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var rle *RateLimitError
+	if errors.As(err, &rle) {
+		t.Errorf("403 without rate-limit headers should not classify as RateLimitError: %v", err)
+	}
+}
+
+func TestParseRateLimit_MissingResetHeader(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("X-RateLimit-Remaining", "0")
+	rle := parseRateLimit(resp, "body")
+	if rle == nil {
+		t.Fatal("expected non-nil RateLimitError when remaining=0")
+	}
+	if !rle.ResetAt.IsZero() {
+		t.Errorf("ResetAt should be zero when header is missing, got %v", rle.ResetAt)
 	}
 }
 

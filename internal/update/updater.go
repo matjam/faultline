@@ -13,12 +13,59 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/matjam/faultline/internal/version"
 )
+
+// rateLimitDefaultBackoff is the delay used when GitHub returns a
+// rate-limit error without a parseable X-RateLimit-Reset header. An
+// hour matches the anonymous-limit reset cadence and is a safe
+// fallback regardless of which clock the server is on.
+const rateLimitDefaultBackoff = 1 * time.Hour
+
+// rateLimitMaxBackoff caps the backoff so an absurdly-far-future or
+// clock-skewed reset time can't lock the updater out indefinitely.
+const rateLimitMaxBackoff = 6 * time.Hour
+
+// rateLimitMinBackoff is the floor applied when ResetAt is in the
+// past (clock skew, rounding) -- we'd rather wait a moment than
+// hammer the API again instantly.
+const rateLimitMinBackoff = 30 * time.Second
+
+// rateLimitDelay extracts a backoff duration from a *RateLimitError
+// in the error chain. Returns ok=false when err is not a rate-limit
+// error. When ResetAt is unknown, returns the default backoff. The
+// returned duration includes a small jitter so multiple agents
+// sharing an IP don't synchronize their retries against the same
+// reset boundary.
+func rateLimitDelay(err error) (time.Duration, bool) {
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		return 0, false
+	}
+	if rle.ResetAt.IsZero() {
+		return rateLimitDefaultBackoff + rateLimitJitter(), true
+	}
+	d := time.Until(rle.ResetAt) + rateLimitJitter()
+	if d < rateLimitMinBackoff {
+		d = rateLimitMinBackoff
+	}
+	if d > rateLimitMaxBackoff {
+		d = rateLimitMaxBackoff
+	}
+	return d, true
+}
+
+// rateLimitJitter returns a small randomized backoff component to
+// de-synchronize multiple agents whose check intervals would otherwise
+// all expire at the same X-RateLimit-Reset boundary. 0-30s.
+func rateLimitJitter() time.Duration {
+	return time.Duration(rand.IntN(30)) * time.Second
+}
 
 // Memory is the subset of the agent's memory store the updater uses.
 // *fs.Store satisfies it. Defined here so the updater package doesn't
@@ -152,9 +199,21 @@ func (u *Updater) Run(ctx context.Context) {
 			}
 			// Errors here are already logged inside checkAndMaybeApply
 			// via u.logger; the polling loop just retries on the next
-			// tick.
-			_, _ = u.checkAndMaybeApply(ctx, false)
-			timer.Reset(u.cfg.CheckInterval)
+			// tick -- except for rate-limit errors, where we extend
+			// the next interval to (or past) the documented reset
+			// time so we don't burn the remaining quota on retries
+			// that will all fail.
+			next := u.cfg.CheckInterval
+			if _, err := u.checkAndMaybeApply(ctx, false); err != nil {
+				if d, ok := rateLimitDelay(err); ok && d > next {
+					u.logger.Warn("github rate-limited; deferring next update check",
+						"delay", d.Round(time.Second),
+						"resume_at", time.Now().Add(d).Format(time.RFC3339),
+					)
+					next = d
+				}
+			}
+			timer.Reset(next)
 		}
 	}
 }
@@ -196,7 +255,16 @@ func (u *Updater) check(ctx context.Context) State {
 	}
 	if err != nil {
 		s.Err = err
-		s.Note = fmt.Sprintf("check failed: %s", err)
+		// Surface rate-limit details specifically so the operator
+		// (or the agent invoking update_check) sees a clear "wait
+		// until X" message rather than a raw HTTP 403.
+		var rle *RateLimitError
+		if errors.As(err, &rle) && !rle.ResetAt.IsZero() {
+			s.Note = fmt.Sprintf("rate-limited by GitHub; next check after %s",
+				rle.ResetAt.Format(time.RFC3339))
+		} else {
+			s.Note = fmt.Sprintf("check failed: %s", err)
+		}
 		u.logger.Warn("update check failed", "error", err)
 		u.state.Store(&s)
 		return s
