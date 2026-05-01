@@ -1,0 +1,39 @@
+{{define "layout"}}<!doctype html>
+<html lang="en" data-theme="dim">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{.Title}} — Faultline admin</title>
+  <link rel="stylesheet" href="/admin/static/daisyui.css">
+  <link rel="stylesheet" href="/admin/static/daisyui-themes.css">
+  <script src="/admin/static/tailwind.js"></script>
+  <script src="/admin/static/htmx.min.js" defer></script>
+  <link rel="icon" href="data:,">
+</head>
+<body class="bg-base-200 min-h-screen">
+  {{if .Authenticated}}
+    {{template "navbar" .}}
+  {{end}}
+  <main class="container mx-auto p-4 max-w-6xl">
+    {{template "content" .}}
+  </main>
+</body>
+</html>
+{{end}}
+
+{{define "navbar"}}
+<div class="navbar bg-base-100 shadow-sm">
+  <div class="container mx-auto max-w-6xl">
+    <div class="flex-1">
+      <a class="btn btn-ghost text-xl" href="/admin">Faultline</a>
+    </div>
+    <div class="flex-none gap-2">
+      <span class="text-sm opacity-70">signed in as <span class="font-mono">{{.Username}}</span></span>
+      <form method="POST" action="/admin/logout" class="inline">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+        <button class="btn btn-sm btn-ghost" type="submit">Sign out</button>
+      </form>
+    </div>
+  </div>
+</div>
+{{end}}

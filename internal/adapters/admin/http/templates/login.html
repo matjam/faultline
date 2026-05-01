@@ -1,0 +1,36 @@
+{{define "content"}}
+<div class="hero min-h-[80vh]">
+  <div class="hero-content w-full max-w-md">
+    <div class="card w-full bg-base-100 shadow-xl">
+      <div class="card-body">
+        <h1 class="card-title text-2xl">Sign in</h1>
+        <p class="text-sm opacity-70 mb-4">Faultline admin UI</p>
+
+        {{if .Error}}
+        <div class="alert alert-error mb-2">
+          <span>{{.Error}}</span>
+        </div>
+        {{end}}
+
+        <form method="POST" action="/admin/login" class="flex flex-col gap-3">
+          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+          <label class="floating-label">
+            <span>Username</span>
+            <input type="text" name="username" required autofocus
+                   autocomplete="username"
+                   class="input input-bordered w-full"
+                   value="{{.Username}}">
+          </label>
+          <label class="floating-label">
+            <span>Password</span>
+            <input type="password" name="password" required
+                   autocomplete="current-password"
+                   class="input input-bordered w-full">
+          </label>
+          <button type="submit" class="btn btn-primary mt-2">Sign in</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
