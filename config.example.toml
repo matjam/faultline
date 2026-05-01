@@ -140,6 +140,59 @@ user     = ""
 password = ""
 
 # ---------------------------------------------------------------------------
+# [update] — automatic self-update.
+#
+# When enabled, a background goroutine polls the configured GitHub repo's
+# releases on the given interval. If a newer version is available, the
+# updater downloads the matching release tarball, verifies it against the
+# published SHA256SUMS, atomically swaps the binary, and triggers graceful
+# shutdown so the new binary takes over. The agent's get_version tool is
+# always available; update_check / update_apply are advertised only when
+# self-update is enabled.
+#
+# The LLM does not decide whether to update -- it can only kick off the
+# same code path the polling goroutine runs. Disable here if you don't
+# want auto-updates at all.
+# ---------------------------------------------------------------------------
+[update]
+enabled = false
+
+# How often to poll GitHub releases. Operator-triggered checks via the
+# update_check tool run on demand regardless of this interval. Use shorter
+# values (e.g. "5m") for fast iteration; the default is conservative
+# enough not to risk GitHub rate-limit issues even if you run many agents.
+check_interval = "1h"
+
+# "owner/name" of the GitHub repository whose releases we poll.
+github_repo = "matjam/faultline"
+
+# What to do after a successful update applies. Options:
+#   "exit"      - save state and os.Exit(0). Suitable for any process
+#                 supervisor that respawns the unit (systemd, Docker,
+#                 Kubernetes, runit, supervisord, etc.). This is the
+#                 simplest and most common choice.
+#   "self-exec" - save state and syscall.Exec the new binary, replacing
+#                 the current process image. Same PID. Use this when
+#                 running bare without a supervisor (tmux, screen,
+#                 manual ./faultline run).
+#   "command"   - save state, run restart_command (split on whitespace,
+#                 detached), then exit. For custom orchestrators.
+restart_mode = "exit"
+
+# Only used when restart_mode = "command".
+restart_command = ""
+
+# Whether to consider releases marked as prerelease (alpha / beta / rc).
+# Default false: stable releases only.
+allow_prerelease = false
+
+# Absolute path of the running binary. The updater swaps this file in
+# place. Leave empty to auto-detect via os.Executable() at startup; you
+# really only need to set this if running under unusual launchers that
+# break os.Executable().
+binary_path = ""
+
+# ---------------------------------------------------------------------------
 # [limits] — content-size caps for LLM-facing surfaces.
 #
 # Each limit applies to a different surface; when content is clipped, a

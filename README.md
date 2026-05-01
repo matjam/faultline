@@ -136,13 +136,27 @@ An optional Docker-based execution environment for Python scripts. Uses [`uv`](h
 
 When `[email]` is configured, the agent gets an `email_fetch` tool that opens a short-lived IMAP connection per call. Useful for letting the agent pick up things its operator emails to a dedicated inbox.
 
+### Self-update (optional)
+
+When `[update]` is enabled, a background goroutine polls GitHub releases on a configured interval. If a newer version is available, the updater downloads the matching release tarball, verifies it against the published `SHA256SUMS`, atomically swaps the binary in place (keeping the old binary as `<binary>.previous` for one-deep rollback), and triggers graceful shutdown so the new binary takes over.
+
+The LLM does not decide whether to update. The agent has `update_check` and `update_apply` tools that kick off the same code path, so the operator can say "update yourself" via Telegram, but the actual decision logic is in code.
+
+Three restart modes:
+- **`exit`** (default) — save state and exit. Suitable for any process supervisor that respawns the unit (systemd, Docker, Kubernetes, runit, supervisord).
+- **`self-exec`** — save state and `syscall.Exec` the new binary, replacing the process image. Same PID. Suitable for bare-process runs without a supervisor.
+- **`command`** — save state, run a configured restart command, exit. For custom orchestrators.
+
+Disabled by default. See `[update]` in `config.example.toml` for the full surface.
+
 ## Tools
 
 | Category | Tools |
 |----------|-------|
 | **Internet** | `web_fetch`, `wiki_fetch` |
 | **Memory** | `memory_read`, `memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`, `memory_list`, `memory_list_trash`, `memory_empty_trash`, `memory_search`, `memory_grep` |
-| **System** | `context_status`, `get_time`, `sleep`, `send_message` |
+| **System** | `context_status`, `get_time`, `sleep`, `send_message`, `get_version` |
+| **Self-update** (when enabled) | `update_check`, `update_apply` |
 | **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |
 | **Email** (when configured) | `email_fetch` |
 

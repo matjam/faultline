@@ -10,7 +10,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +30,7 @@ import (
 	"github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/tools"
+	"github.com/matjam/faultline/internal/update"
 	"github.com/matjam/faultline/internal/version"
 )
 
@@ -53,14 +58,34 @@ func main() {
 	ctx, forceCancel := context.WithCancel(context.Background())
 	defer forceCancel()
 
+	// shutdownCh is closed exactly once -- by either the signal
+	// handler or the updater. Whichever fires first wins; the other
+	// is a no-op via shutdownOnce.
 	shutdownCh := make(chan struct{})
+	var shutdownOnce sync.Once
+
+	// updateResult is set by the updater BEFORE it closes shutdownCh,
+	// so when Agent.Run returns we can read it and dispatch the
+	// configured restart action. nil = signal-driven shutdown, no
+	// restart needed.
+	var updateResult atomic.Pointer[update.Result]
+
+	closeShutdown := func(r *update.Result) {
+		shutdownOnce.Do(func() {
+			if r != nil {
+				updateResult.Store(r)
+			}
+			close(shutdownCh)
+		})
+	}
+
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
 		logger.Info("shutdown requested, saving state... (send again to force quit)")
-		close(shutdownCh)
+		closeShutdown(nil)
 
 		<-sigCh
 		logger.Info("forced shutdown")
@@ -168,9 +193,27 @@ func main() {
 		email = &cfg.Email
 	}
 
-	exec := tools.New(memory, index, tg, sb, email, kb, logger,
+	// Updater. Always constructed so the get_version tool works even
+	// when self-update is disabled; the polling goroutine starts only
+	// when cfg.Update.Enabled.
+	binaryPath := cfg.Update.BinaryPath
+	if binaryPath == "" {
+		if exe, err := os.Executable(); err == nil {
+			binaryPath = exe
+		}
+	}
+	updater := update.New(update.Config{
+		Enabled:         cfg.Update.Enabled,
+		CheckInterval:   cfg.Update.CheckInterval.Duration(),
+		GitHubRepo:      cfg.Update.GitHubRepo,
+		AllowPrerelease: cfg.Update.AllowPrerelease,
+		BinaryPath:      binaryPath,
+	}, memory, closeShutdown, logger)
+	go updater.Run(ctx)
+
+	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
-	defer exec.Close()
+	defer toolExec.Close()
 
 	state := jsonfile.NewPersister(cfg.Agent.StateFile, logger)
 
@@ -182,7 +225,7 @@ func main() {
 		Search:    index,
 		Operator:  operator,
 		Tokenizer: tokenizer,
-		Tools:     exec,
+		Tools:     toolExec,
 		State:     state,
 	}, logger)
 	defer a.Close()
@@ -201,6 +244,62 @@ func main() {
 	}
 
 	logger.Info("agent shut down gracefully")
+
+	// If shutdown was triggered by an applied update, dispatch the
+	// configured restart action. Adapters that own their own resources
+	// were closed via defer above, so it is safe to exec a new binary
+	// or run a restart command at this point.
+	if r := updateResult.Load(); r != nil {
+		dispatchRestart(*r, cfg.Update.RestartMode, cfg.Update.RestartCommand, binaryPath, logger)
+	}
+}
+
+// dispatchRestart runs the configured action after a successful update
+// has been applied and the agent loop has shut down cleanly. Returns
+// only on "exit" or "command" (the supervisor / new process takes over
+// from here); does not return for "self-exec".
+func dispatchRestart(r update.Result, mode, command, binaryPath string, logger *slog.Logger) {
+	switch mode {
+	case "", "exit":
+		logger.Info("update applied; exiting for supervisor restart",
+			"from", r.FromVersion, "to", r.ToVersion)
+	case "self-exec":
+		logger.Info("update applied; replacing process image with new binary",
+			"from", r.FromVersion, "to", r.ToVersion, "binary", binaryPath)
+		// syscall.Exec replaces the current process image. Same PID.
+		// On success this call never returns. On failure we fall
+		// through to os.Exit so the supervisor (if any) can pick up
+		// the new binary on the next start.
+		if err := syscall.Exec(binaryPath, os.Args, os.Environ()); err != nil {
+			logger.Error("self-exec failed; falling back to exit", "error", err)
+			os.Exit(1)
+		}
+	case "command":
+		logger.Info("update applied; running configured restart command",
+			"from", r.FromVersion, "to", r.ToVersion, "command", command)
+		runRestartCommand(command, logger)
+	default:
+		logger.Warn("unknown restart_mode; treating as exit",
+			"mode", mode, "from", r.FromVersion, "to", r.ToVersion)
+	}
+}
+
+// runRestartCommand splits command on whitespace and starts it
+// detached so it survives this process exiting. Errors are logged but
+// not fatal; the new binary is already in place, so even a failed
+// restart command leaves the deploy in a recoverable state.
+func runRestartCommand(command string, logger *slog.Logger) {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		logger.Warn("restart_command is empty; nothing to run")
+		return
+	}
+	cmd := exec.Command(parts[0], parts[1:]...)
+	// Detach: new session group so the child outlives our exit.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		logger.Error("restart command failed to start", "error", err)
+	}
 }
 
 // buildLogger wires a console handler at the configured level alongside a
