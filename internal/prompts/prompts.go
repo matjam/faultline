@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/skills"
 )
 
 // Embedded default prompt contents, compiled into the binary from templates/.
@@ -164,16 +165,29 @@ func Render(template string, now time.Time) string {
 	return result
 }
 
-// BuildCycleContext assembles the full system message with recent memories.
-// memoryCharLimit caps the per-entry content size; when exceeded, a
-// retrieval hint is appended pointing the agent at memory_read so it can
-// load the rest of the file. A non-positive limit disables the cap.
-func BuildCycleContext(systemPrompt string, memories []bm25.Result, now time.Time, memoryCharLimit int) string {
+// BuildCycleContext assembles the full system message with recent
+// memories and (optionally) the skill catalog. Both sections are
+// omitted entirely when their input slice is empty -- no empty
+// headers in the rendered prompt.
+//
+// memoryCharLimit caps the per-entry memory excerpt size; when
+// exceeded, a retrieval hint is appended pointing the agent at
+// memory_read. A non-positive limit disables the cap.
+//
+// skillCatalog, when non-empty, is rendered as an "## Available
+// Skills" section with a brief instruction telling the agent to call
+// skill_activate when a task matches a skill's description. Each
+// entry costs ~50-100 tokens, matching the spec's tier-1 disclosure.
+func BuildCycleContext(systemPrompt string, memories []bm25.Result, skillCatalog []skills.Skill, now time.Time, memoryCharLimit int) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
 	sb.WriteString("\n\n---\n\n")
 	fmt.Fprintf(&sb, "**Current Time**: %s\n\n", now.Format(time.RFC1123))
+
+	if len(skillCatalog) > 0 {
+		writeSkillCatalog(&sb, skillCatalog)
+	}
 
 	if len(memories) > 0 {
 		sb.WriteString("## Recent Memories\n\n")
@@ -195,6 +209,24 @@ func BuildCycleContext(systemPrompt string, memories []bm25.Result, now time.Tim
 	}
 
 	return sb.String()
+}
+
+// writeSkillCatalog renders the tier-1 skill disclosure section:
+// behavioral instructions plus a bulleted name/description list.
+// Format follows the agentskills.io implementation guide: the catalog
+// itself is small (~100 tok per skill), full instructions only load
+// when the model calls skill_activate.
+func writeSkillCatalog(sb *strings.Builder, catalog []skills.Skill) {
+	sb.WriteString("## Available Skills\n\n")
+	sb.WriteString("The following skills provide specialized instructions for specific tasks. ")
+	sb.WriteString("When a task matches a skill's description, call the `skill_activate` tool ")
+	sb.WriteString("with the skill's name to load its full instructions. ")
+	sb.WriteString("Skills can also expose bundled scripts and references that are loaded ")
+	sb.WriteString("on demand via `skill_read`, and execute scripts in an isolated sandbox via `skill_execute`.\n\n")
+	for _, s := range catalog {
+		fmt.Fprintf(sb, "- **%s**: %s\n", s.Name, s.Description)
+	}
+	sb.WriteString("\n")
 }
 
 // lineCountFor returns the number of newline-delimited lines in s. A

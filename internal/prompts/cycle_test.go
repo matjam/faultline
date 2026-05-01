@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/skills"
 )
 
 func TestBuildCycleContext_NoMemories(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
-	got := BuildCycleContext("SYSTEM PROMPT", nil, now, 2000)
+	got := BuildCycleContext("SYSTEM PROMPT", nil, nil, now, 2000)
 
 	if !strings.Contains(got, "SYSTEM PROMPT") {
 		t.Error("output missing system prompt")
@@ -21,6 +22,9 @@ func TestBuildCycleContext_NoMemories(t *testing.T) {
 	if strings.Contains(got, "Recent Memories") {
 		t.Error("output should not have Recent Memories section when no memories provided")
 	}
+	if strings.Contains(got, "Available Skills") {
+		t.Error("output should not have Available Skills section when no skills provided")
+	}
 }
 
 func TestBuildCycleContext_WithMemories(t *testing.T) {
@@ -29,7 +33,7 @@ func TestBuildCycleContext_WithMemories(t *testing.T) {
 		{Path: "alpha.md", Content: "alpha content"},
 		{Path: "beta.md", Content: "beta content"},
 	}
-	got := BuildCycleContext("SYS", mems, now, 2000)
+	got := BuildCycleContext("SYS", mems, nil, now, 2000)
 
 	if !strings.Contains(got, "Recent Memories") {
 		t.Error("missing Recent Memories header")
@@ -48,7 +52,7 @@ func TestBuildCycleContext_WithMemories(t *testing.T) {
 func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 	long := strings.Repeat("x", 3000)
 	mems := []bm25.Result{{Path: "long.md", Content: long}}
-	got := BuildCycleContext("SYS", mems, time.Now(), 2000)
+	got := BuildCycleContext("SYS", mems, nil, time.Now(), 2000)
 
 	if !strings.Contains(got, "[truncated") {
 		t.Error("expected truncation marker for long memory")
@@ -70,12 +74,48 @@ func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 func TestBuildCycleContext_NoLimitKeepsFullContent(t *testing.T) {
 	long := strings.Repeat("x", 3000)
 	mems := []bm25.Result{{Path: "long.md", Content: long}}
-	got := BuildCycleContext("SYS", mems, time.Now(), 0)
+	got := BuildCycleContext("SYS", mems, nil, time.Now(), 0)
 
 	if strings.Contains(got, "[truncated") {
 		t.Error("did not expect truncation marker when limit is disabled")
 	}
 	if strings.Count(got, "x") < 3000 {
 		t.Errorf("expected full 3000 x's when limit disabled; got %d", strings.Count(got, "x"))
+	}
+}
+
+func TestBuildCycleContext_WithSkills(t *testing.T) {
+	cat := []skills.Skill{
+		{Name: "pdf-processing", Description: "Handle PDFs."},
+		{Name: "data-analysis", Description: "Analyze datasets."},
+	}
+	got := BuildCycleContext("SYS", nil, cat, time.Now(), 2000)
+
+	if !strings.Contains(got, "## Available Skills") {
+		t.Error("missing Available Skills header")
+	}
+	if !strings.Contains(got, "**pdf-processing**: Handle PDFs.") {
+		t.Errorf("missing pdf-processing entry; got %q", got)
+	}
+	if !strings.Contains(got, "**data-analysis**: Analyze datasets.") {
+		t.Error("missing data-analysis entry")
+	}
+	if !strings.Contains(got, "skill_activate") {
+		t.Error("missing skill_activate instruction")
+	}
+}
+
+func TestBuildCycleContext_SkillsAndMemoriesTogether(t *testing.T) {
+	cat := []skills.Skill{{Name: "x", Description: "x."}}
+	mems := []bm25.Result{{Path: "m.md", Content: "memory body"}}
+	got := BuildCycleContext("SYS", mems, cat, time.Now(), 2000)
+
+	skillsIdx := strings.Index(got, "## Available Skills")
+	memIdx := strings.Index(got, "## Recent Memories")
+	if skillsIdx < 0 || memIdx < 0 {
+		t.Fatalf("missing one or both sections: skillsIdx=%d memIdx=%d", skillsIdx, memIdx)
+	}
+	if skillsIdx > memIdx {
+		t.Error("skills section should appear before memories")
 	}
 }

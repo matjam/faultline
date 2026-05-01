@@ -18,6 +18,7 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 	prompt "github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
+	skillsdomain "github.com/matjam/faultline/internal/skills"
 )
 
 // Agent is the autonomous agent that runs in a continuous loop.
@@ -30,6 +31,7 @@ type Agent struct {
 	tokenizer Tokenizer // nil when no real tokenizer is detected
 	tools     Tools
 	state     StateStore
+	skills    Skills // nil when skills support is disabled
 	logger    *slog.Logger
 }
 
@@ -44,11 +46,12 @@ type Deps struct {
 	Tokenizer Tokenizer // optional
 	Tools     Tools
 	State     StateStore
+	Skills    Skills // optional
 }
 
 // New constructs an Agent. Any nil-allowed dependency (Operator,
-// Tokenizer) may be left as a nil interface; the agent handles those
-// cases internally with heuristic fallbacks.
+// Tokenizer, Skills) may be left as a nil interface; the agent handles
+// those cases internally with heuristic fallbacks or empty catalogs.
 func New(cfg *config.Config, deps Deps, logger *slog.Logger) *Agent {
 	return &Agent{
 		cfg:       cfg,
@@ -59,8 +62,25 @@ func New(cfg *config.Config, deps Deps, logger *slog.Logger) *Agent {
 		tokenizer: deps.Tokenizer,
 		tools:     deps.Tools,
 		state:     deps.State,
+		skills:    deps.Skills,
 		logger:    logger,
 	}
+}
+
+// gatherSkillCatalog returns the current skill catalog for system-prompt
+// injection. Returns nil when skills support is disabled. Reload errors
+// are logged but never fatal -- a transient filesystem hiccup
+// shouldn't kill the agent loop, and the previous catalog stays in
+// place until the next attempt.
+func (a *Agent) gatherSkillCatalog() []skillsdomain.Skill {
+	if a.skills == nil {
+		return nil
+	}
+	if err := a.skills.Reload(); err != nil {
+		a.logger.Warn("skills: reload failed; using previous catalog",
+			"error", err)
+	}
+	return a.skills.List()
 }
 
 // Close releases the resources owned by the agent. Adapters whose
@@ -454,12 +474,13 @@ func (a *Agent) initializeContext() ([]llm.Message, map[string]string, int, erro
 		return nil, nil, 0, fmt.Errorf("load prompts: %w", err)
 	}
 
-	// Build a fresh system message from current prompts + recent memories.
-	// This is used both for fresh starts and for replacing the (stale)
-	// system message in a restored state file.
+	// Build a fresh system message from current prompts + recent memories
+	// + current skill catalog. This is used both for fresh starts and
+	// for replacing the (stale) system message in a restored state file.
 	memories := a.gatherContextMemories()
+	skillCatalog := a.gatherSkillCatalog()
 	now := time.Now()
-	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
 	systemMsg := llm.Message{
 		Role:    llm.RoleSystem,
 		Content: fullSystemPrompt,
@@ -590,10 +611,12 @@ func (a *Agent) rebuildContext(summary string) ([]llm.Message, map[string]string
 		return nil, nil, fmt.Errorf("load prompts: %w", err)
 	}
 
-	// Load fresh memories
+	// Load fresh memories and refresh the skill catalog so any skills
+	// the operator has dropped in since the last cycle become visible.
 	memories := a.gatherContextMemories()
+	skillCatalog := a.gatherSkillCatalog()
 	now := time.Now()
-	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, now, a.cfg.Limits.RecentMemoryChars)
+	fullSystemPrompt := prompt.BuildCycleContext(prompts["system"], memories, skillCatalog, now, a.cfg.Limits.RecentMemoryChars)
 
 	messages := []llm.Message{
 		{Role: llm.RoleSystem, Content: fullSystemPrompt},
