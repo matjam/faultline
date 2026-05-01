@@ -78,10 +78,11 @@ type webCacheEntry struct {
 
 // webCache is a TTL cache for web_fetch results with proactive eviction.
 type webCache struct {
-	mu      sync.Mutex
-	entries map[string]webCacheEntry
-	ttl     time.Duration
-	stop    chan struct{}
+	mu        sync.Mutex
+	entries   map[string]webCacheEntry
+	ttl       time.Duration
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 func newWebCache(ttl time.Duration) *webCache {
@@ -94,9 +95,15 @@ func newWebCache(ttl time.Duration) *webCache {
 	return c
 }
 
-// Close stops the background eviction goroutine.
+// Close stops the background eviction goroutine. Idempotent: safe to
+// call more than once. The Tools port doc declares Close as the
+// agent's responsibility, but a defensive sync.Once guards against any
+// future caller (or doubled-up defer in the composition root) closing
+// the channel twice and panicking.
 func (c *webCache) Close() {
-	close(c.stop)
+	c.closeOnce.Do(func() {
+		close(c.stop)
+	})
 }
 
 // evictLoop periodically removes expired entries.

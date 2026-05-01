@@ -232,7 +232,10 @@ func main() {
 	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex,
 		cfg.Embeddings.BatchSize, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
-	defer toolExec.Close()
+	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
+	// executor's lifecycle via the Tools port; agent.Close() (deferred
+	// below) calls tools.Close() exactly once. A second defer here was
+	// previously closing webCache.stop twice and panicking on shutdown.
 
 	state := jsonfile.NewPersister(cfg.Agent.StateFile, logger)
 

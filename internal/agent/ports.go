@@ -61,6 +61,11 @@ type Tokenizer interface {
 // against. Implemented by *tools.Executor. ToolDefs is fixed for the
 // life of the process; Execute runs one tool call and returns the
 // result body that will be wrapped in a tool-role chat message.
+//
+// The agent owns the tool executor's lifecycle: Close is invoked from
+// Agent.Close, so the composition root must not separately defer a
+// close on the same instance. Implementations should still make Close
+// idempotent as a defensive measure.
 type Tools interface {
 	ToolDefs() []llm.Tool
 	Execute(ctx context.Context, call llm.ToolCall) string
