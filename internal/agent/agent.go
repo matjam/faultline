@@ -315,6 +315,28 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		}
 	}()
 
+	// Apply any pending prompt migrations before entering the main
+	// loop. This is the delivery mechanism for shipped prompt
+	// updates that need to be reflected in operator-owned mutable
+	// prompt files; see internal/prompts/migrations.go for the
+	// design. No-op for subagents and for primaries with nothing
+	// pending.
+	//
+	// Tool calls during migrations honor toolCtx (cancels on
+	// graceful shutdown). LLM Chat calls keep using parent ctx so
+	// in-flight generations can finish naturally if a shutdown
+	// arrives mid-migration.
+	//
+	// Errors from the migration runner are logged and swallowed: a
+	// failure here must not prevent the agent from starting up.
+	if newMessages, newPrompts, err := a.runPromptMigrations(ctx, toolCtx, messages, toolDefs, prompts); err != nil {
+		a.logger.Error("prompt migrations: runner failed; continuing without applying",
+			"error", err)
+	} else {
+		messages = newMessages
+		prompts = newPrompts
+	}
+
 	// Track the message log length and idle streak at the moment of the
 	// last successful save. We only re-save when something has actually
 	// changed since then, so an agent sitting on `select` waiting for
