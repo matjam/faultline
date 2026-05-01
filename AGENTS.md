@@ -22,10 +22,19 @@ faultline/
     config/                   TOML config loading
     log/                      DailyFileWriter, MultiHandler (slog)
     prompts/                  embedded prompt templates, Load, LoadAll,
-                              Render, BuildCycleContext
+                              Render, BuildCycleContext, plus the
+                              prompt-migrations subsystem (LoadMigrations,
+                              LoadAppliedMigrations, PendingMigrations,
+                              RecordMigrationApplied)
       templates/              the embedded *.md defaults
+        migrations/           one-shot prompt-update instructions
+                              (NNN_slug.md) shipped with releases
     tools/                    tool registry & dispatcher
       executor.go             Executor + all tool handlers
+      untrusted.go            wrapUntrusted helper for tool output
+                              that contains content not under our
+                              control (web pages, sandbox stdout,
+                              email bodies, etc.)
       vector.go               Embedder interface + per-mutation reindex helpers
       wiki.go                 wiki_fetch tool
       html_test.go            HTML-to-markdown converter tests
@@ -175,7 +184,9 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
   | `Tools` | `*tools.Executor` | ToolDefs, Execute, SetContextInfo, Close. |
   | `StateStore` | `*jsonfile.Persister` | Save/Load conversation log; binds path + logger at construction. |
   | `Skills` | `*skillsfs.Store` | nil-allowed; List/Reload for the tier-1 catalog injection in `BuildCycleContext`. Tools layer drives the rest. |
-  | `Subagents` | `*subagent.Manager` | nil-allowed; Pending/HasPending drive the inbox drain in `injectPendingMessages` (parallel to operator), Profiles feeds the system-prompt catalog, CancelAll fires from `gracefulSave`. Tools layer holds the same pointer for `subagent_run/spawn/wait/status/cancel`. |
+  | `Subagents` | `*subagent.Manager` | nil-allowed; Pending/HasPending drive the inbox drain in `injectPendingMessages` (parallel to operator), Profiles feeds the system-prompt catalog, CancelAll fires from `gracefulSave`, ActiveCount feeds the per-iteration inspector update. Tools layer holds the same pointer for `subagent_run/spawn/wait/status/cancel`. |
+
+  In addition, `*Agent` exposes `Snapshot() AgentSnapshot` (defined in `internal/agent/snapshot.go`). This is a consumer-defined port: the admin HTTP adapter's `AgentInspector` interface depends on the value type, but `*Agent` itself imports nothing adapter-side. The snapshot includes phase, token estimate, message count, idle streak, cumulative chat / tool-call / token counters, and the most recent error — all guarded by an `RWMutex` written from the loop only. Reads are lock-free for everyone except the writer; concurrent admin polls scale.
 
 ### internal/config/
 
@@ -194,12 +205,14 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
 - `prompts.Render(template, now)`: substitutes `{{TIME}}` placeholders.
 - `prompts.BuildCycleContext(systemPrompt, memories, now, charLimit)`: assembles the full system message with recent memory excerpts and truncation hints.
 - `prompts.Store` is a tiny interface (Read/Write) that `*fs.Store` satisfies structurally, so the prompts package doesn't import the memory adapter.
+- **Prompt migrations** (`migrations.go`, `templates/migrations/NNN_slug.md`): shipped one-shot instructions that update operator-owned mutable prompt files in place. Files like `000_add_untrusted_content_convention.md` are embedded via `go:embed all:templates/migrations`. `LoadMigrations` parses the filename pattern (`\d+_slug.md`), `LoadAppliedMigrations` reads the runtime-maintained record at `prompts/migrations.md` (Markdown with `## Applied` section, lines like `- 000 slug 2026-05-01T12:00:00Z [optional note]`), `PendingMigrations` diffs the two, and `RecordMigrationApplied` appends a record line. The agent runner (`internal/agent/migrations.go`) executes each pending migration as a short bounded sub-loop with the agent's normal Chat + Tools surface; the LLM applies the requested edits via `memory_edit` / `memory_insert` etc. and signals completion with a text-only response. Migrations must be idempotent (the body checks current state before editing). After all pending migrations run, the runner reloads prompts and rebuilds the in-place system message so the resumed conversation continues with the updated system prompt at index 0.
 
 ### internal/tools/
 
 `tools.Executor` and all tool handlers. The largest package by line count.
 
-- **`executor.go`**: `Executor` struct, `New()` constructor, `ToolDefs()` (tool registry advertised to the LLM), `Execute()` central dispatch, web fetching with custom HTML-to-markdown converter (~400 lines), `webCache` with TTL eviction, all `memory_*` / `sandbox_*` / utility (`get_time`, `sleep`, `send_message`, `context_status`) handlers.
+- **`executor.go`**: `Executor` struct, `New()` constructor, `ToolDefs()` (tool registry advertised to the LLM), `Execute()` (which times the dispatch, fans the result to an optional `Observer`, and delegates to the historical switch in `dispatch()`), web fetching with custom HTML-to-markdown converter (~400 lines), `webCache` with TTL eviction, all `memory_*` / `sandbox_*` / utility (`get_time`, `sleep`, `send_message`, `context_status`) handlers.
+- **`observer.go`**: `Observer` interface (consumer-side) and `ToolCallEvent` value type. `OnToolCall` is invoked synchronously after every dispatch returns; the admin UI's ring buffer is the only current implementation. Args / result fields are pre-truncated via `summarizeToolField` (rune-safe) to keep events compact; `classifyToolError` lifts `Error:` / `Failed:` prefixes into a structured field for UI styling.
 - **`chunk.go`**: paragraph-aware splitter (`splitIntoUnits`), unit-key encoding helpers (`unitKey`, `pathFromUnitKey`, `chunkIdxFromUnitKey`). `maxParagraphBytes = 3000` is the only fallback cap — applied only when a single paragraph exceeds it, in which case it's byte-cut into sequential pieces.
 - **`vector.go`**: `Embedder` interface (consumer-side; defined here rather than in `agent/ports.go` because the agent loop never embeds), per-mutation paragraph-aware reindex helpers (`reindexVector`, `removeVector`, `removeVectorPrefix`, `renameVector`, `reindexVectorDir`), path-exclusion logic (skip `prompts/` and `.trash/`), the adaptive batcher `embedWithAdaptiveBatching` (halves batch size on failure, grows back after 5 success streak, skips single-input failures), `fileLevelHits` for collapsing chunk-level search hits to one-per-file, dual-mode `memory_search` description selector, and the bulk reconcile/rebuild entry points (`ReconcileVectorIndex`, `RebuildVectorIndex`) used by both the startup reconcile in `cmd/faultline/embeddings.go` and the `rebuild_indexes` tool. The mutation hooks called from `executor.go` are no-ops when the feature is disabled, so the dispatcher code is identical regardless of operator config.
 - **`wiki.go`**: `wiki_fetch` tool (MediaWiki API + plain-text extraction + cache).
@@ -305,6 +318,7 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 
 `fs.Store` is the filesystem-backed Skills adapter; satisfies the agent's `Skills` port plus extra methods used by the tools layer (`Get`, `Read`, `Resources`).
 
+- Operator-controlled enable/disable via `skills.toml` (path from `cfg.Admin.SkillsFile`). The admin UI's Skills card writes the file on every toggle; the file lists disabled skill names under a `disabled = []` array. `LoadDisabledFromFile` populates the in-memory disabled set; `List` and `Get` filter disabled skills out so the agent never sees them. `ListAll` (admin-only) returns the unfiltered catalog with a per-row `Disabled` flag.
 - Discovery walks `<root>/<name>/SKILL.md` at depth 2; non-skill subdirectories (no SKILL.md) and dotfile dirs (`.git`, etc.) are ignored.
 - Frontmatter parser uses `gopkg.in/yaml.v3` with a one-shot lenient retry that quotes unquoted-colon values (the spec's most common authoring mistake). Strict parse fails with no retry success surface as warnings; the skill is dropped.
 - Lenient validation: name mismatch with directory → use directory name (with diagnostic); over-length name/description/compatibility → diagnostic, still loaded; missing description → hard skip.
@@ -345,15 +359,17 @@ Local-auth primitives consumed by the admin HTTP adapter. No domain dependency; 
 
 Embedded HTTP admin UI driving adapter (stage-2 skeleton). Stdlib `net/http` only — no chi/gin/echo — to match the project's minimal-deps posture. Bound to a loopback address by default; reverse-proxy TLS termination is the documented path for remote access. There is no built-in TLS.
 
-- **`server.go`**: `Server`, `New`, `Run`, `Shutdown`, route registration. Each (layout, content) pair is parsed once at startup into its own `*template.Template` so the `{{define "content"}}` blocks across content files do not collide as they would in a single ParseFS-parsed set.
+- **`server.go`**: `Server`, `New`, `Run`, `Shutdown`, route registration, `SetInspectors` for late-bound agent + subagent ports. Each (layout, content) pair is parsed once at startup into its own `*template.Template` so the `{{define "content"}}` blocks across content files do not collide as they would in a single ParseFS-parsed set.
 - **`middleware.go`**: `requireAuth` (session lookup + CSRF check on non-safe methods), `requestLogger` (per-request structured log line; static-asset paths demoted to debug). CSRF is enforced on every `POST` / `PUT` / `DELETE` etc. via the `_csrf` form field compared against `Session.CSRFToken`.
 - **`handlers_auth.go`**: `GET/POST /admin/login`, `POST /admin/logout`. Login uses a separate short-lived `faultline_login_csrf` cookie because there is no session yet at that point; the cookie is rotated on every form render and cleared on successful login. Failed logins return a generic message and an HTTP 401, never disclosing whether the username existed.
+- **`handlers_dashboard.go`**: dashboard shell + the three live HTMX fragments (`/admin/fragments/status`, `/admin/fragments/tools`, `/admin/fragments/subagents`). Fragments are pre-parsed standalone templates (no layout) and served with `Cache-Control: no-store`. The dashboard polls each at 1–2 s via `hx-trigger="load, every Ns"` — SSE was deferred because polling is cheap on a single-operator UI and avoids an extra JS extension. `templateFuncs` exposes `formatDuration`, `formatRelative`, `sinceShort`, `percent`, `phaseClass`, `errorClass` to keep templates free of arithmetic.
+- **`inspector.go`**: read-side ports the dashboard consumes — `AgentInspector` (single method `Snapshot() agent.AgentSnapshot`) and `SubagentInspector` (`Status` + `Profiles`), defined consumer-side in adminhttp. `ToolBuffer` is the in-memory ring buffer that satisfies `tools.Observer`; capacity defaults to 500. The same `*ToolBuffer` is handed to the primary `tools.Executor` as its `Observer`.
 - **`assets/`**: vendored `htmx.min.js` (2.0.9), `tailwind.js` (`@tailwindcss/browser@4`, in-browser JIT), `daisyui.css` and `daisyui-themes.css` (5.5.19). All embedded via `go:embed`. Tailwind in the browser was chosen over a build-step CLI because the admin UI is low-traffic and avoiding a Node-flavored toolchain was an explicit requirement.
-- **`templates/`**: `layout.html`, `login.html`, `dashboard.html`. Embedded via `go:embed`.
+- **`templates/`**: `layout.html`, `login.html`, `dashboard.html`, plus the fragment templates `frag_status.html`, `frag_tools.html`, `frag_subagents.html`. Embedded via `go:embed`.
 
 Composition wiring lives in `cmd/faultline/admin.go`. The admin server runs under the parent process context: first SIGINT closes `shutdownCh` (agent saves state) but the admin server stays up; second SIGINT cancels the parent context and the server shuts down. After the agent loop returns, `main.go` cancels the context explicitly so the admin server unblocks for clean exit.
 
-In stage 2 the admin server has no view of agent internals — that comes in stage 3+ via the `AgentInspector` / `SubagentInspector` / `ToolObserver` ports.
+The wiring order is load-bearing: admin is built first (it owns the tool ring buffer), the tool executor takes that buffer as its `Observer`, the agent is built on top of the executor, then the agent + subagent manager are attached back to the admin server via `SetInspectors`. Both inspector ports are nil-allowed; the dashboard fragments render placeholders when an inspector is missing.
 
 ## Key Design Patterns
 

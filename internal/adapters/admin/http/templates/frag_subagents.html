@@ -1,0 +1,69 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between">
+      <h2 class="card-title">Subagents</h2>
+      {{if .HasManager}}
+      <span class="text-sm opacity-70">
+        {{len .Active}} active · {{len .Profiles}} profile(s)
+      </span>
+      {{else}}
+      <span class="badge badge-ghost">disabled</span>
+      {{end}}
+    </div>
+
+    {{if .HasManager}}
+      {{if .Active}}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Work ID</th>
+              <th>Profile</th>
+              <th>Mode</th>
+              <th>Elapsed</th>
+              <th>Prompt</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Active}}
+            <tr>
+              <td class="font-mono text-xs">{{.WorkID}}</td>
+              <td class="text-xs">{{.Profile}}</td>
+              <td class="text-xs">
+                {{if .Async}}
+                <span class="badge badge-sm badge-info">async</span>
+                {{else}}
+                <span class="badge badge-sm badge-outline">sync</span>
+                {{end}}
+              </td>
+              <td class="font-mono text-xs whitespace-nowrap">{{sinceShort .Started}}</td>
+              <td class="text-xs opacity-80 break-words">{{.Prompt}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="opacity-60 italic text-sm">No subagents running right now.</p>
+      {{end}}
+
+      {{if .Profiles}}
+      <div class="mt-4">
+        <h3 class="font-semibold text-sm mb-2 opacity-80">Available profiles</h3>
+        <div class="flex flex-wrap gap-2">
+          {{range .Profiles}}
+          <div class="badge badge-outline" title="{{.Purpose}}">
+            {{.Name}}{{if .Model}} · <span class="opacity-60 ml-1">{{.Model}}</span>{{end}}
+          </div>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    {{else}}
+    <p class="opacity-70 text-sm">
+      Subagent delegation is not enabled in this configuration. Set
+      <code>[subagent] enabled = true</code> to turn it on.
+    </p>
+    {{end}}
+  </div>
+</div>

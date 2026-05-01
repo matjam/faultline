@@ -45,6 +45,13 @@ type Store struct {
 	mu      sync.RWMutex
 	catalog map[string]*skills.Skill
 	order   []string // sorted skill names for deterministic List output
+
+	// Operator-controlled enable/disable state, loaded from a
+	// TOML file by LoadDisabledFromFile. Disabled skills disappear
+	// from List/Get (the agent never sees them) but remain
+	// visible via ListAll for the admin UI's toggle page.
+	stateFile string
+	disabled  map[string]bool
 }
 
 // New constructs a Store rooted at dir. Reload is called once
@@ -212,26 +219,37 @@ func LoadSkillForValidation(raw []byte, dir, mdPath, dirName string) (*skills.Sk
 	return loadSkill(raw, dir, mdPath, dirName)
 }
 
-// List returns all skills in the catalog, ordered by name. The
-// returned slice is a copy of the underlying records; mutating it does
-// not affect the store.
+// List returns all skills in the catalog that are not operator-
+// disabled, ordered by name. The agent uses this for system-prompt
+// catalog injection and the tools layer uses it for skill_activate;
+// disabled skills are invisible to both. The returned slice is a
+// copy of the underlying records; mutating it does not affect the
+// store.
+//
+// To see every skill regardless of state, use ListAll (admin UI).
 func (s *Store) List() []skills.Skill {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]skills.Skill, 0, len(s.order))
 	for _, name := range s.order {
+		if s.disabled[name] {
+			continue
+		}
 		out = append(out, *s.catalog[name])
 	}
 	return out
 }
 
 // Get returns the skill with the given name. Returns ErrNotFound if
-// the skill is not in the catalog.
+// the skill is not in the catalog or is operator-disabled. The same
+// error is used for both cases on purpose: the agent shouldn't
+// distinguish "skill doesn't exist" from "skill turned off by the
+// operator" — either way, it can't run the skill.
 func (s *Store) Get(name string) (skills.Skill, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	sk, ok := s.catalog[name]
-	if !ok {
+	if !ok || s.disabled[name] {
 		return skills.Skill{}, fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	return *sk, nil

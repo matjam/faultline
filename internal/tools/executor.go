@@ -1022,6 +1022,14 @@ type Executor struct {
 	// the report and signals the child agent to stop).
 	subagentMgr      *subagent.Manager
 	subagentReportFn func(text string)
+
+	// observer is an optional hook called after every tool call
+	// returns. Wired by the composition root for the admin UI's
+	// tool-call feed. Nil-safe: when not set, Execute is
+	// unchanged. Subagent Executors may share or omit the
+	// observer at the composition root's discretion; the primary
+	// always carries it when admin is enabled.
+	observer Observer
 }
 
 // Deps bundles the dependencies an Executor needs. Each Executor
@@ -1076,6 +1084,11 @@ type Deps struct {
 	// for stashing the text and signaling the child agent loop
 	// to stop on its next iteration.
 	SubagentReportFn func(text string)
+
+	// Observer is an optional hook receiving a record of every
+	// tool call after it completes. Wired by the composition
+	// root for the admin UI's live tool-call feed.
+	Observer Observer
 }
 
 // New creates a new tool executor.
@@ -1132,6 +1145,7 @@ func New(deps Deps) *Executor {
 		cache:               deps.WebCache,
 		subagentMgr:         deps.SubagentManager,
 		subagentReportFn:    deps.SubagentReportFn,
+		observer:            deps.Observer,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -1181,13 +1195,58 @@ func (te *Executor) SetContextInfo(currentTokens int) {
 	te.currentTokens = currentTokens
 }
 
-// Execute runs a tool call and returns the result string.
-// ctx is used for operations that need cancellation/timeout (e.g. sandbox Docker commands).
+// summaryArgsBudget / summaryResultBudget cap the field sizes copied
+// into the per-call ToolCallEvent observed by the admin UI. Big
+// enough to convey intent, small enough that the ring buffer stays
+// cheap (500 events * 600 chars = ~300 KiB per buffer).
+const (
+	summaryArgsBudget   = 200
+	summaryResultBudget = 400
+)
+
+// Execute runs a tool call and returns the result string. ctx is used
+// for operations that need cancellation/timeout (e.g. sandbox Docker
+// commands).
+//
+// The body delegates to dispatch (the historical switch) so timing,
+// argument/result summarisation, and observer notification can wrap
+// the dispatch in one place. Observer notification is best-effort:
+// failure of an observer must not affect the LLM-visible return
+// value.
 func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 	name := call.Function.Name
 	args := call.Function.Arguments
 
 	te.logger.Info("tool call", "name", name, "args_len", len(args), "mode", te.mode.String())
+
+	start := time.Now()
+	result := te.dispatch(ctx, call)
+	duration := time.Since(start)
+
+	if te.observer != nil {
+		te.observer.OnToolCall(ToolCallEvent{
+			Mode:          te.mode.String(),
+			Name:          name,
+			CallID:        call.ID,
+			StartedAt:     start,
+			Duration:      duration,
+			ArgsSummary:   summarizeToolField(args, summaryArgsBudget),
+			ArgsBytes:     len(args),
+			ResultSummary: summarizeToolField(result, summaryResultBudget),
+			ResultBytes:   len(result),
+			Error:         classifyToolError(result),
+		})
+	}
+
+	return result
+}
+
+// dispatch is the historical Execute body: a single switch over tool
+// name. Kept as an internal method so Execute can wrap it without
+// duplicating the dispatch table.
+func (te *Executor) dispatch(ctx context.Context, call llm.ToolCall) string {
+	name := call.Function.Name
+	args := call.Function.Arguments
 
 	// Defensive surface check: ToolDefs already strips these for
 	// subagents, but a flaky LLM may hallucinate a tool name. Reject
@@ -1593,7 +1652,10 @@ func (te *Executor) sandboxShell(ctx context.Context, argsJSON string) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return output
+	// stdout/stderr is whatever the (potentially network-fetching)
+	// command produced; treat it as untrusted even though the
+	// command itself was issued by the agent.
+	return wrapUntrusted(fmt.Sprintf("sandbox_shell: %s", args.Command), output)
 }
 
 func (te *Executor) webFetch(argsJSON string) string {
@@ -1689,7 +1751,9 @@ func (te *Executor) webFetch(argsJSON string) string {
 		header += fmt.Sprintf(" [use offset=%d to continue]", endPos)
 	}
 
-	return header + "\n\n" + text
+	// The position metadata above is our trusted text; the page
+	// body below it is not. Wrap only the body.
+	return header + "\n\n" + wrapUntrusted(args.URL, text)
 }
 
 func (te *Executor) memoryRead(argsJSON string) string {
@@ -2323,14 +2387,18 @@ func (te *Executor) emailFetch(argsJSON string) string {
 		if err != nil {
 			return fmt.Sprintf("Error: %s", err)
 		}
-		return body
+		// Email body is fully attacker-controllable.
+		source := fmt.Sprintf("email %s UID %d body", args.Folder, args.UID)
+		return wrapUntrusted(source, body)
 	}
 
 	result, err := c.FetchOverviews(args.Folder, args.Limit)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return result
+	// Subject + From + dates in overviews are also attacker-controllable.
+	source := fmt.Sprintf("email %s overviews (limit %d)", args.Folder, args.Limit)
+	return wrapUntrusted(source, result)
 }
 
 func (te *Executor) sendMessage(argsJSON string) string {
@@ -2788,7 +2856,9 @@ func (te *Executor) sandboxExecute(ctx context.Context, argsJSON string) string 
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return output
+	// Script output may include data the script fetched from the
+	// network; treat it as untrusted.
+	return wrapUntrusted(fmt.Sprintf("sandbox_execute: %s", args.Script), output)
 }
 
 func (te *Executor) sandboxInstallPackage(ctx context.Context, argsJSON string) string {
@@ -2805,7 +2875,9 @@ func (te *Executor) sandboxInstallPackage(ctx context.Context, argsJSON string) 
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return fmt.Sprintf("Package installed successfully.\n%s", output)
+	// uv output contains package metadata fetched from PyPI; wrap.
+	return "Package installed successfully.\n" +
+		wrapUntrusted(fmt.Sprintf("uv install: %s", args.Package), output)
 }
 
 func (te *Executor) sandboxUpgradePackage(ctx context.Context, argsJSON string) string {

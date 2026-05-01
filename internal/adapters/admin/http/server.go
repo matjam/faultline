@@ -24,12 +24,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"runtime"
 	"sync"
 	"time"
 
 	"github.com/matjam/faultline/internal/adapters/auth/users"
-	"github.com/matjam/faultline/internal/version"
 )
 
 // Deps bundles the dependencies the composition root injects.
@@ -52,6 +50,34 @@ type Deps struct {
 
 	// Logger is the shared slog logger.
 	Logger *slog.Logger
+
+	// Agent is the live primary agent inspector. nil-allowed: when
+	// not wired the dashboard renders empty placeholders. Stage 3
+	// onward expects this to be set.
+	Agent AgentInspector
+
+	// Subagents is the live subagent.Manager inspector. nil-allowed
+	// when [subagent] is disabled.
+	Subagents SubagentInspector
+
+	// Tools is the in-memory tool-call ring buffer. The same
+	// instance is wired into the primary's tools.Executor as the
+	// Observer, so the admin UI sees every dispatch. nil-allowed.
+	Tools *ToolBuffer
+
+	// Skills is the read+write port for the Skills page.
+	// nil-allowed (skills feature off, or stage 5 not yet wired).
+	Skills SkillsAdmin
+
+	// Update is the read+write port for the self-update pane.
+	// nil-allowed: when not set, the Update card renders a
+	// "updater not wired" placeholder.
+	Update UpdateInspector
+
+	// Config is the read+write port for the configuration editor
+	// page. nil-allowed; the Config card surfaces a not-wired
+	// placeholder otherwise.
+	Config ConfigStore
 }
 
 // Server is the HTTP admin UI server. Construct with New, run with
@@ -59,6 +85,7 @@ type Deps struct {
 type Server struct {
 	deps      Deps
 	templates map[string]*template.Template // contentName -> layout+content combined
+	fragments map[string]*template.Template // fragName -> standalone template
 	staticSub fs.FS
 
 	srv      *http.Server
@@ -77,6 +104,19 @@ type Server struct {
 var contentTemplates = []string{
 	"login.html",
 	"dashboard.html",
+}
+
+// fragmentTemplates are stand-alone HTMX-fragment templates rendered
+// without a surrounding layout. Each file defines a single named
+// template (matching the file's basename minus .html) which the
+// fragment handlers execute.
+var fragmentTemplates = []string{
+	"frag_status.html",
+	"frag_tools.html",
+	"frag_subagents.html",
+	"frag_skills.html",
+	"frag_update.html",
+	"frag_config.html",
 }
 
 // New parses templates and prepares the static-file sub-FS. Returns
@@ -100,17 +140,32 @@ func New(deps Deps) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("adminhttp: read layout: %w", err)
 	}
+	funcs := templateFuncs()
+
 	tmpls := make(map[string]*template.Template, len(contentTemplates))
 	for _, name := range contentTemplates {
 		contentBytes, err := fs.ReadFile(templateFS, "templates/"+name)
 		if err != nil {
 			return nil, fmt.Errorf("adminhttp: read %s: %w", name, err)
 		}
-		t, err := template.New(name).Parse(string(layoutBytes) + string(contentBytes))
+		t, err := template.New(name).Funcs(funcs).Parse(string(layoutBytes) + string(contentBytes))
 		if err != nil {
 			return nil, fmt.Errorf("adminhttp: parse %s: %w", name, err)
 		}
 		tmpls[name] = t
+	}
+
+	frags := make(map[string]*template.Template, len(fragmentTemplates))
+	for _, name := range fragmentTemplates {
+		fragBytes, err := fs.ReadFile(templateFS, "templates/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("adminhttp: read %s: %w", name, err)
+		}
+		t, err := template.New(name).Funcs(funcs).Parse(string(fragBytes))
+		if err != nil {
+			return nil, fmt.Errorf("adminhttp: parse %s: %w", name, err)
+		}
+		frags[name] = t
 	}
 
 	staticSub, err := fs.Sub(staticFS, "assets")
@@ -118,7 +173,7 @@ func New(deps Deps) (*Server, error) {
 		return nil, fmt.Errorf("adminhttp: sub-fs assets: %w", err)
 	}
 
-	return &Server{deps: deps, templates: tmpls, staticSub: staticSub}, nil
+	return &Server{deps: deps, templates: tmpls, fragments: frags, staticSub: staticSub}, nil
 }
 
 // Run binds the listener and serves until ctx is canceled or
@@ -164,6 +219,45 @@ func (s *Server) Shutdown() {
 	s.shutdown()
 }
 
+// SetInspectors swaps in the live agent + subagent inspectors after
+// construction. Used by the composition root because the agent
+// constructor in turn depends on the tools.Executor (which we feed
+// the admin's ToolBuffer), so the order has to be:
+//
+//  1. build admin (owns the tool buffer)
+//  2. build tools.Executor with admin's tool buffer as Observer
+//  3. build agent on top of the executor
+//  4. attach inspectors back to admin
+//
+// Either argument may be nil; nil disables that section of the
+// dashboard rather than producing an error.
+func (s *Server) SetInspectors(agent AgentInspector, subs SubagentInspector) {
+	s.deps.Agent = agent
+	s.deps.Subagents = subs
+}
+
+// SetSkillsAdmin wires the Skills toggle port. Separate from
+// SetInspectors because the skills store is constructed before the
+// agent (no ordering dependency on the tool buffer), but kept on
+// its own setter for clarity.
+func (s *Server) SetSkillsAdmin(sk SkillsAdmin) {
+	s.deps.Skills = sk
+}
+
+// SetUpdateInspector wires the self-update read+write port. The
+// updater is always constructed in main.go (it serves the
+// get_version tool even when self-update is disabled), so this is
+// usually called even when cfg.Update.Enabled is false; the pane
+// renders a "auto-update off" view in that case.
+func (s *Server) SetUpdateInspector(u UpdateInspector) {
+	s.deps.Update = u
+}
+
+// SetConfigStore wires the read+write configuration port.
+func (s *Server) SetConfigStore(c ConfigStore) {
+	s.deps.Config = c
+}
+
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
 		if s.srv == nil {
@@ -191,6 +285,33 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/{$}", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("GET /admin", s.requireAuth(s.handleDashboard))
 
+	// Live HTMX fragments. Polled by the dashboard at low frequency
+	// (1–2s) so the operator sees fresh state without the cost of
+	// SSE plumbing. All require auth.
+	mux.HandleFunc("GET /admin/fragments/status", s.requireAuth(s.handleFragStatus))
+	mux.HandleFunc("GET /admin/fragments/tools", s.requireAuth(s.handleFragTools))
+	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
+	mux.HandleFunc("GET /admin/fragments/skills", s.requireAuth(s.handleFragSkills))
+	mux.HandleFunc("GET /admin/fragments/update", s.requireAuth(s.handleFragUpdate))
+	mux.HandleFunc("GET /admin/fragments/config", s.requireAuth(s.handleFragConfig))
+
+	// Skills toggle action. Re-renders the skills fragment so
+	// HTMX can hx-swap the updated card without a full page load.
+	mux.HandleFunc("POST /admin/skills/toggle", s.requireAuth(s.handleSkillsToggle))
+
+	// Update actions. /apply triggers a destructive update and
+	// graceful shutdown; the response body is the new card with
+	// a flash explaining what happened, but the browser will
+	// likely lose the connection mid-shutdown — that's fine.
+	mux.HandleFunc("POST /admin/update/apply", s.requireAuth(s.handleUpdateApply))
+
+	// Config actions: validate, save, restart. Each re-renders
+	// the config fragment with a flash so the operator sees the
+	// outcome inline.
+	mux.HandleFunc("POST /admin/config/validate", s.requireAuth(s.handleConfigValidate))
+	mux.HandleFunc("POST /admin/config/save", s.requireAuth(s.handleConfigSave))
+	mux.HandleFunc("POST /admin/config/restart", s.requireAuth(s.handleConfigRestart))
+
 	// Anything not under /admin gets 404. We intentionally don't
 	// take over /; the agent doesn't expose anything else on this
 	// port, and forwarding "/" to "/admin" would trip up reverse
@@ -200,42 +321,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	})
 }
 
-// dashboardData is the template data for the stub dashboard. Will
-// expand significantly as inspector ports come online.
-type dashboardData struct {
-	Title         string
-	Authenticated bool
-	Username      string
-	CSRFToken     string
-
-	Version      string
-	GoVersion    string
-	StartedAt    string
-	Uptime       string
-	SessionCount int
-}
-
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromContext(r.Context())
-	uptime := time.Since(s.deps.StartedAt).Round(time.Second)
-	data := dashboardData{
-		Title:         "Dashboard",
-		Authenticated: true,
-		Username:      sess.Username,
-		CSRFToken:     sess.CSRFToken,
-		Version:       version.String(),
-		GoVersion:     runtime.Version(),
-		StartedAt:     s.deps.StartedAt.UTC().Format(time.RFC3339),
-		Uptime:        uptime.String(),
-		SessionCount:  s.deps.Sessions.Count(),
-	}
-	s.render(w, "dashboard.html", data)
 }
 
 // render executes the layout template for the named content. Each

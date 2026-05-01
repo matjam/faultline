@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.6.0](https://github.com/matjam/faultline/compare/v1.5.0...v1.6.0) (2026-05-01)
+
+
+### Features
+
+* **admin:** in-place config editor with validate / save / restart ([#34](https://github.com/matjam/faultline/issues/34)) ([ec1608e](https://github.com/matjam/faultline/commit/ec1608ec02382ca2b61a7df515e7e3669c1c3a93))
+* **admin:** live agent inspector + tool-call feed on dashboard ([dcb252c](https://github.com/matjam/faultline/commit/dcb252c2a4739ab832b66cf5345ea273a7ba0cc0))
+* **admin:** per-skill enable/disable persisted to skills.toml ([#32](https://github.com/matjam/faultline/issues/32)) ([9c842bc](https://github.com/matjam/faultline/commit/9c842bc4fd9ce9f6f2cc820b287ea4921e5c93b7))
+* **admin:** scaffold HTTP admin UI with login + session auth ([2bcba17](https://github.com/matjam/faultline/commit/2bcba17b966eac0ec13cc5bcba1c67fadf8e533f))
+* **admin:** self-update card with apply-now button ([#33](https://github.com/matjam/faultline/issues/33)) ([f61e87a](https://github.com/matjam/faultline/commit/f61e87a3f2e866e7e1f8379933e92b79c1c5d30c))
+* untrusted-tool-output guard + prompt-migration delivery ([#36](https://github.com/matjam/faultline/issues/36)) ([98819f1](https://github.com/matjam/faultline/commit/98819f114d92d2ceb3174e9664f1bd5147c7553c))
+
+
+### Bug Fixes
+
+* **update:** back off polling on GitHub rate-limit responses ([2f570e1](https://github.com/matjam/faultline/commit/2f570e1ee7eb41a231edb408c770924860311a7d))
+
 ## [1.5.0](https://github.com/matjam/faultline/compare/v1.4.0...v1.5.0) (2026-05-01)
 
 

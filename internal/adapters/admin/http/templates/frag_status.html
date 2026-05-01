@@ -1,0 +1,93 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <h2 class="card-title">Primary agent</h2>
+      {{if .HasAgent}}
+      <span class="badge {{phaseClass .Snapshot.Phase}} badge-lg font-mono">
+        {{.Snapshot.Phase}}
+      </span>
+      {{else}}
+      <span class="badge badge-ghost">no agent inspector wired</span>
+      {{end}}
+    </div>
+
+    {{if .HasAgent}}
+    <div class="text-sm opacity-70 mb-2">
+      In phase for <span class="font-mono">{{.PhaseSince}}</span> ·
+      uptime <span class="font-mono">{{.Uptime}}</span> ·
+      messages <span class="font-mono">{{.Snapshot.MessageCount}}</span> ·
+      idle streak <span class="font-mono">{{.Snapshot.IdleStreak}}</span>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+      <div>
+        <div class="flex items-center justify-between text-sm mb-1">
+          <span class="opacity-70">Context tokens</span>
+          <span class="font-mono">{{.Snapshot.TokenEstimate}} / {{.Snapshot.MaxTokens}}</span>
+        </div>
+        <progress class="progress progress-primary w-full"
+                  value="{{.TokenPercent}}" max="100"></progress>
+        <div class="text-xs opacity-60 mt-1">
+          compaction at <span class="font-mono">{{.Snapshot.CompactionThreshold}}</span>
+          ({{.CompactionPercent}}% reached)
+        </div>
+      </div>
+
+      <div>
+        <div class="text-sm opacity-70 mb-1">Last LLM call</div>
+        <div class="text-sm">
+          <span class="font-mono">{{.LastChatRelative}}</span>
+          {{if .Snapshot.LastChatLatency}}
+          · latency
+          <span class="font-mono">{{formatDuration .Snapshot.LastChatLatency}}</span>
+          {{end}}
+          {{if .Snapshot.LastFinishReason}}
+          · finish
+          <span class="badge badge-sm badge-outline font-mono">{{.Snapshot.LastFinishReason}}</span>
+          {{end}}
+        </div>
+        {{if or .Snapshot.LastChatPromptTokens .Snapshot.LastChatCompletionTokens}}
+        <div class="text-xs opacity-60 mt-1">
+          last call:
+          prompt <span class="font-mono">{{.Snapshot.LastChatPromptTokens}}</span>,
+          completion <span class="font-mono">{{.Snapshot.LastChatCompletionTokens}}</span>
+        </div>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+      <div class="stat p-2">
+        <div class="stat-title text-xs">Total chats</div>
+        <div class="stat-value text-lg font-mono">{{.Snapshot.TotalChats}}</div>
+      </div>
+      <div class="stat p-2">
+        <div class="stat-title text-xs">Tool calls</div>
+        <div class="stat-value text-lg font-mono">{{.Snapshot.TotalToolCalls}}</div>
+      </div>
+      <div class="stat p-2">
+        <div class="stat-title text-xs">Prompt tokens</div>
+        <div class="stat-value text-lg font-mono">{{.Snapshot.TotalPromptTokens}}</div>
+      </div>
+      <div class="stat p-2">
+        <div class="stat-title text-xs">Completion tokens</div>
+        <div class="stat-value text-lg font-mono">{{.Snapshot.TotalCompletionTokens}}</div>
+      </div>
+    </div>
+
+    {{if .Snapshot.LastError}}
+    <div class="alert alert-error mt-4">
+      <div class="flex flex-col gap-1">
+        <span class="font-semibold">Last error · {{.LastErrorRelative}}</span>
+        <code class="text-xs whitespace-pre-wrap break-words">{{.Snapshot.LastError}}</code>
+      </div>
+    </div>
+    {{end}}
+    {{else}}
+    <p class="opacity-70">
+      No agent inspector is wired to the admin server.
+      Check <code>cmd/faultline/admin.go</code>.
+    </p>
+    {{end}}
+  </div>
+</div>

@@ -1,0 +1,55 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between">
+      <h2 class="card-title">Recent tool calls</h2>
+      <span class="text-sm opacity-70">
+        {{.Total}} / {{.Cap}} buffered
+      </span>
+    </div>
+
+    {{if .Newest}}
+    <div class="overflow-x-auto">
+      <table class="table table-sm table-zebra">
+        <thead>
+          <tr>
+            <th class="w-32">When</th>
+            <th class="w-40">Tool</th>
+            <th class="w-20">Mode</th>
+            <th class="w-20">Took</th>
+            <th>Args</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Newest}}
+          <tr>
+            <td class="font-mono text-xs whitespace-nowrap">{{sinceShort .StartedAt}} ago</td>
+            <td class="font-mono text-xs">{{.Name}}</td>
+            <td class="text-xs">
+              {{if eq .Mode "subagent"}}
+              <span class="badge badge-sm badge-warning">{{.Mode}}</span>
+              {{else}}
+              <span class="badge badge-sm badge-outline">{{.Mode}}</span>
+              {{end}}
+            </td>
+            <td class="font-mono text-xs whitespace-nowrap">{{formatDuration .Duration}}</td>
+            <td class="text-xs opacity-80 break-all">{{.ArgsSummary}}</td>
+            <td class="text-xs break-all">
+              {{if .Error}}
+              <span class="badge badge-xs badge-error mr-1">err</span>
+              {{end}}
+              <span class="opacity-90">{{.ResultSummary}}</span>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="opacity-60 italic text-sm">
+      No tool calls observed yet. Once the agent dispatches a tool the
+      most recent calls will appear here.
+    </p>
+    {{end}}
+  </div>
+</div>

@@ -1,0 +1,223 @@
+package adminhttp
+
+import (
+	"html/template"
+	"net/http"
+	"runtime"
+	"time"
+
+	"github.com/matjam/faultline/internal/agent"
+	"github.com/matjam/faultline/internal/subagent"
+	"github.com/matjam/faultline/internal/tools"
+	"github.com/matjam/faultline/internal/version"
+)
+
+// templateFuncs returns the FuncMap shared by every template the
+// admin server renders. Keeping these in one place makes it obvious
+// to a reader which helpers are available, and keeps the dashboard
+// templates terse.
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
+		"formatDuration": FormatDuration,
+		"formatRelative": FormatRelative,
+		"sinceShort": func(t time.Time) string {
+			if t.IsZero() {
+				return "—"
+			}
+			return FormatDuration(time.Since(t))
+		},
+		"percent": func(part, whole int) int {
+			if whole <= 0 {
+				return 0
+			}
+			p := part * 100 / whole
+			if p < 0 {
+				return 0
+			}
+			if p > 100 {
+				return 100
+			}
+			return p
+		},
+		"phaseClass": func(p agent.Phase) string {
+			// daisyUI badge classes keyed off phase. Operator
+			// scans the dashboard for status at a glance; color
+			// coding helps.
+			switch p {
+			case agent.PhaseGenerating:
+				return "badge-info"
+			case agent.PhaseExecutingTool:
+				return "badge-secondary"
+			case agent.PhaseCompacting:
+				return "badge-warning"
+			case agent.PhaseSaving:
+				return "badge-warning"
+			case agent.PhaseStopped:
+				return "badge-error"
+			case agent.PhaseInitializing:
+				return "badge-ghost"
+			default:
+				return "badge-success"
+			}
+		},
+		"errorClass": func(err string) string {
+			if err == "" {
+				return "badge-success"
+			}
+			return "badge-error"
+		},
+	}
+}
+
+// dashboardPage is the data passed to dashboard.html on first load.
+// The fragments below carry their own narrower view models.
+type dashboardPage struct {
+	Title         string
+	Authenticated bool
+	Username      string
+	CSRFToken     string
+
+	Version   string
+	GoVersion string
+
+	StartedAt    string
+	Uptime       string
+	SessionCount int
+}
+
+// fragStatusData backs frag_status.html — the agent status card and
+// stats grid. Includes derived values (Uptime, etc.) so the template
+// stays free of arithmetic.
+type fragStatusData struct {
+	HasAgent bool
+	Snapshot agent.AgentSnapshot
+
+	Uptime            string
+	PhaseSince        string
+	LastChatRelative  string
+	LastErrorRelative string
+
+	TokenPercent      int
+	CompactionPercent int
+}
+
+// fragToolsData backs frag_tools.html — the recent tool calls table.
+type fragToolsData struct {
+	Events []tools.ToolCallEvent
+	// Newest is reversed (most recent first) for display; the
+	// template iterates over Newest, not Events.
+	Newest []tools.ToolCallEvent
+	Total  int
+	Cap    int
+}
+
+// fragSubagentsData backs frag_subagents.html — the live children
+// table. Profiles are surfaced separately so the dashboard can show
+// "you have N profiles available, M active right now".
+type fragSubagentsData struct {
+	HasManager bool
+	Active     []subagent.ActiveStatus
+	Profiles   []subagent.Profile
+}
+
+// handleDashboard renders the dashboard shell. The dynamic fragments
+// (status, tools, subagents) load via HTMX after first paint.
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFromContext(r.Context())
+	uptime := time.Since(s.deps.StartedAt).Round(time.Second)
+	data := dashboardPage{
+		Title:         "Dashboard",
+		Authenticated: true,
+		Username:      sess.Username,
+		CSRFToken:     sess.CSRFToken,
+		Version:       version.String(),
+		GoVersion:     runtime.Version(),
+		StartedAt:     s.deps.StartedAt.UTC().Format(time.RFC3339),
+		Uptime:        uptime.String(),
+		SessionCount:  s.deps.Sessions.Count(),
+	}
+	s.render(w, "dashboard.html", data)
+}
+
+// handleFragStatus renders the live agent status fragment.
+func (s *Server) handleFragStatus(w http.ResponseWriter, _ *http.Request) {
+	data := fragStatusData{}
+	if s.deps.Agent != nil {
+		snap := s.deps.Agent.Snapshot()
+		data.HasAgent = true
+		data.Snapshot = snap
+		data.Uptime = FormatDuration(time.Since(snap.StartedAt))
+		data.PhaseSince = FormatDuration(time.Since(snap.PhaseSince))
+		data.LastChatRelative = FormatRelative(snap.LastChatAt)
+		data.LastErrorRelative = FormatRelative(snap.LastErrorAt)
+
+		if snap.MaxTokens > 0 {
+			data.TokenPercent = snap.TokenEstimate * 100 / snap.MaxTokens
+		}
+		if snap.CompactionThreshold > 0 {
+			p := snap.TokenEstimate * 100 / snap.CompactionThreshold
+			if p > 100 {
+				p = 100
+			}
+			data.CompactionPercent = p
+		}
+	}
+	s.renderFragment(w, "frag_status.html", data)
+}
+
+// handleFragTools renders the recent tool-call feed.
+func (s *Server) handleFragTools(w http.ResponseWriter, _ *http.Request) {
+	data := fragToolsData{}
+	if s.deps.Tools != nil {
+		// Cap the table at 50 rows; the buffer is much larger,
+		// but rendering 500 rows on every poll is wasteful and
+		// the operator scrolls to history less often than they
+		// glance at "what just happened".
+		data.Newest = reverseEvents(s.deps.Tools.SnapshotRecent(50))
+		data.Events = data.Newest
+		data.Total = s.deps.Tools.Len()
+		data.Cap = s.deps.Tools.Cap()
+	}
+	s.renderFragment(w, "frag_tools.html", data)
+}
+
+// handleFragSubagents renders the subagent panel.
+func (s *Server) handleFragSubagents(w http.ResponseWriter, _ *http.Request) {
+	data := fragSubagentsData{}
+	if s.deps.Subagents != nil {
+		data.HasManager = true
+		data.Active = s.deps.Subagents.Status()
+		data.Profiles = s.deps.Subagents.Profiles()
+	}
+	s.renderFragment(w, "frag_subagents.html", data)
+}
+
+// renderFragment executes a fragment template (no layout). Any
+// rendering error is logged; partial writes can't be unwound by
+// http.Error so we don't try.
+func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
+	t, ok := s.fragments[name]
+	if !ok {
+		s.deps.Logger.Error("renderFragment: unknown template", "name", name)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Discourage proxies from caching; the fragment changes on
+	// every poll.
+	w.Header().Set("Cache-Control", "no-store")
+	if err := t.Execute(w, data); err != nil {
+		s.deps.Logger.Error("renderFragment: execute",
+			"template", name, "error", err)
+	}
+}
+
+// reverseEvents returns a copy of events with the order flipped, so
+// the most recent event is first. Used by the tools fragment.
+func reverseEvents(events []tools.ToolCallEvent) []tools.ToolCallEvent {
+	out := make([]tools.ToolCallEvent, len(events))
+	for i, e := range events {
+		out[len(events)-1-i] = e
+	}
+	return out
+}
