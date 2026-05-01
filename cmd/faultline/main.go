@@ -29,6 +29,7 @@ import (
 	"github.com/matjam/faultline/internal/log"
 	"github.com/matjam/faultline/internal/prompts"
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/search/vector"
 	"github.com/matjam/faultline/internal/tools"
 	"github.com/matjam/faultline/internal/update"
 	"github.com/matjam/faultline/internal/version"
@@ -211,7 +212,24 @@ func main() {
 	}, memory, closeShutdown, logger)
 	go updater.Run(ctx)
 
-	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, logger,
+	// Embeddings + vector index. Optional; failure on probe disables
+	// the feature for this session but doesn't stop the agent — the
+	// core loop is fully functional with BM25-only search.
+	var embedder tools.Embedder
+	var vIndex *vector.Index
+	if cfg.Embeddings.Active() {
+		embedder, vIndex = setupEmbeddings(ctx, cfg, memory, logger)
+	}
+	if vIndex != nil {
+		// Persistence loop runs for the lifetime of the agent. It
+		// flushes the index when dirty on a 30s tick, plus a final
+		// flush on shutdown via defer below.
+		vectorPath := vectorIndexPath(cfg.Agent.MemoryDir)
+		go runVectorPersistence(ctx, vIndex, vectorPath, logger)
+		defer flushVectorIndex(vIndex, vectorPath, logger)
+	}
+
+	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 	defer toolExec.Close()
 

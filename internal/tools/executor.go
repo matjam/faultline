@@ -29,6 +29,7 @@ import (
 	"github.com/matjam/faultline/internal/config"
 	"github.com/matjam/faultline/internal/llm"
 	"github.com/matjam/faultline/internal/search/bm25"
+	"github.com/matjam/faultline/internal/search/vector"
 	"github.com/matjam/faultline/internal/update"
 	"github.com/matjam/faultline/internal/version"
 )
@@ -269,7 +270,7 @@ func (te *Executor) ToolDefs() []llm.Tool {
 			Type: llm.ToolTypeFunction,
 			Function: &llm.FunctionDef{
 				Name:        "memory_search",
-				Description: "Search across all memory files by keyword relevance (BM25). Returns up to 5 results, each with: file path, relevance score, and content. Long results are clipped with a hint pointing back at memory_read so you can load the full file. Use this to find memories by topic when you don't know the exact file path. Optionally filter by file modification date.",
+				Description: te.memorySearchDescription(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -940,6 +941,8 @@ type Executor struct {
 	email         *config.EmailConfig
 	kobold        *kobold.Client  // optional; nil means no perf info in context_status
 	updater       *update.Updater // optional; always non-nil but Enabled() may be false
+	embedder      Embedder        // optional; nil means semantic search disabled
+	vIndex        *vector.Index   // optional; nil means semantic search disabled
 	logger        *slog.Logger
 	http          *http.Client
 	cache         *webCache
@@ -949,8 +952,10 @@ type Executor struct {
 	maxSleep      time.Duration // upper bound for the `sleep` tool
 }
 
-// New creates a new tool executor. kb may be nil.
-func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
+// New creates a new tool executor. kb, embedder, and vIndex may be nil.
+// embedder and vIndex must be both nil (feature off) or both non-nil
+// (feature on); main.go is responsible for that pairing.
+func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
 	if sb != nil {
 		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
@@ -962,6 +967,8 @@ func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandb
 		email:     email,
 		kobold:    kb,
 		updater:   updater,
+		embedder:  embedder,
+		vIndex:    vIndex,
 		logger:    logger,
 		maxTokens: maxTokens,
 		limits:    limits,
@@ -1030,7 +1037,7 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 	case "memory_list":
 		return te.memoryList(args)
 	case "memory_search":
-		return te.memorySearch(args)
+		return te.memorySearch(ctx, args)
 	case "memory_delete":
 		return te.memoryDelete(args)
 	case "memory_restore":
@@ -1265,8 +1272,9 @@ func (te *Executor) memoryWrite(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Update search index
+	// Update search indexes (BM25 always; vector index iff enabled).
 	te.index.Update(indexKey(args.Path), args.Content)
+	te.reindexVector(args.Path, args.Content)
 
 	te.logger.Info("memory written", "path", args.Path, "size", len(args.Content))
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(args.Content), args.Path)
@@ -1329,7 +1337,18 @@ func formatBytes(b int64) string {
 	}
 }
 
-func (te *Executor) memorySearch(argsJSON string) string {
+// memorySearchResultLimit is the per-section result count. Both BM25
+// and (when enabled) semantic each return up to this many; total
+// results returned to the LLM may be up to 2x.
+const memorySearchResultLimit = 5
+
+// memorySearchSemanticMinScore is the cosine similarity floor for
+// semantic results. Below this they're noisy enough to hurt more than
+// help. Tuned empirically; OpenAI text-embedding-3-small produces
+// scores in roughly [0.1, 0.9] for in-domain queries.
+const memorySearchSemanticMinScore = 0.30
+
+func (te *Executor) memorySearch(ctx context.Context, argsJSON string) string {
 	var args struct {
 		Query          string `json:"query"`
 		ModifiedAfter  string `json:"modified_after"`
@@ -1343,7 +1362,8 @@ func (te *Executor) memorySearch(argsJSON string) string {
 		return "Error: query is required"
 	}
 
-	// Build a date filter if either bound is provided.
+	// Build a date filter if either bound is provided. Used by both
+	// search modes so date scoping has consistent semantics.
 	var filter func(string) bool
 	if args.ModifiedAfter != "" || args.ModifiedBefore != "" {
 		var after, before time.Time
@@ -1379,14 +1399,47 @@ func (te *Executor) memorySearch(argsJSON string) string {
 		}
 	}
 
-	results := te.index.Search(args.Query, 5, filter)
-	if len(results) == 0 {
+	lexical := te.index.Search(args.Query, memorySearchResultLimit, filter)
+
+	// Semantic pass — only if embeddings are configured. Errors here
+	// are logged and swallowed; the lexical results still go out.
+	var semantic []vector.Result
+	if te.vectorEnabled() {
+		qvec, err := te.embedQuery(ctx, args.Query)
+		if err != nil {
+			te.logger.Warn("memory_search: embed query failed; lexical only",
+				slog.String("err", err.Error()))
+		} else {
+			res, sErr := te.vIndex.Search(qvec, memorySearchResultLimit, memorySearchSemanticMinScore, filter)
+			if sErr != nil {
+				te.logger.Warn("memory_search: vector search failed; lexical only",
+					slog.String("err", sErr.Error()))
+			} else {
+				semantic = res
+			}
+		}
+	}
+
+	if len(lexical) == 0 && len(semantic) == 0 {
 		return "No matching memories found."
 	}
 
 	var sb strings.Builder
 	limit := te.limits.MemorySearchResultChars
-	for i, r := range results {
+
+	// When semantic is configured, emit clearly labeled sections so
+	// the LLM can pick which set of hits is more relevant. When it's
+	// not, fall back to the original single-list shape so we don't
+	// clutter the output for deployments without embeddings.
+	dualMode := te.vectorEnabled()
+
+	if dualMode {
+		sb.WriteString("=== Lexical results (BM25) ===\n")
+		if len(lexical) == 0 {
+			sb.WriteString("(no matches)\n")
+		}
+	}
+	for i, r := range lexical {
 		content := r.Content
 		total := len(content)
 		var tail string
@@ -1397,6 +1450,33 @@ func (te *Executor) memorySearch(argsJSON string) string {
 		}
 		fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s%s\n\n",
 			i+1, r.Path, r.Score, content, tail)
+	}
+
+	if dualMode {
+		sb.WriteString("=== Semantic results ===\n")
+		if len(semantic) == 0 {
+			sb.WriteString("(no matches above similarity threshold)\n")
+		}
+		for i, r := range semantic {
+			// Read the file content for the preview. The vector index
+			// only stores the path + vector, so we go back to disk.
+			// In practice the file is small and this is fast.
+			content, err := te.memory.Read(r.Path)
+			if err != nil {
+				fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n[file unreadable: %s]\n\n",
+					i+1, r.Path, r.Score, err)
+				continue
+			}
+			total := len(content)
+			var tail string
+			if limit > 0 && total > limit {
+				content = content[:limit]
+				tail = fmt.Sprintf("\n[truncated: showing first %d of %d chars; call memory_read with path=%q to read the full file, or with offset=%d to continue from where this preview ends]",
+					limit, total, r.Path, lineCount(content)+1)
+			}
+			fmt.Fprintf(&sb, "--- Result %d: %s (score: %.2f) ---\n%s%s\n\n",
+				i+1, r.Path, r.Score, content, tail)
+		}
 	}
 
 	return sb.String()
@@ -1421,11 +1501,15 @@ func (te *Executor) memoryDelete(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Remove from search index -- for directories, remove all entries under the path
+	// Remove from search indexes -- for directories, remove all entries
+	// under the path. Both BM25 and the vector index (when enabled) get
+	// the same treatment.
 	if stat != nil && stat.IsDir {
 		te.index.RemovePrefix(indexKey(args.Path + "/"))
+		te.removeVectorPrefix(args.Path)
 	} else {
 		te.index.Remove(indexKey(args.Path))
+		te.removeVector(args.Path)
 	}
 
 	te.logger.Info("memory deleted (moved to trash)", "path", args.Path)
@@ -1453,14 +1537,17 @@ func (te *Executor) memoryRestore(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Re-index the restored file(s) -- could be a single file or a directory
+	// Re-index the restored file(s) -- could be a single file or a directory.
+	// Both indexes (BM25 and vector) get refreshed.
 	stat, statErr := te.memory.Stat(restoredPath)
 	if statErr == nil && stat.IsDir {
 		te.reindexDir(restoredPath)
+		te.reindexVectorDir(restoredPath)
 	} else {
 		content, readErr := te.memory.Read(restoredPath)
 		if readErr == nil {
 			te.index.Update(indexKey(restoredPath), content)
+			te.reindexVector(restoredPath, content)
 		}
 	}
 
@@ -1541,15 +1628,20 @@ func (te *Executor) memoryMove(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Update search index: remove old entries, add new ones
+	// Update search indexes: remove old entries, add new ones. Vector
+	// index can rename without re-embedding for files (content unchanged);
+	// directories require a walk because per-file paths changed.
 	if isDir {
 		te.index.RemovePrefix(indexKey(args.Source + "/"))
+		te.removeVectorPrefix(args.Source)
 		te.reindexDir(args.Destination)
+		te.reindexVectorDir(args.Destination)
 	} else {
 		te.index.Remove(indexKey(args.Source))
 		if readErr == nil {
 			te.index.Update(indexKey(args.Destination), oldContent)
 		}
+		te.renameVector(args.Source, args.Destination)
 	}
 
 	te.logger.Info("memory moved", "from", args.Source, "to", args.Destination)
@@ -1909,10 +2001,11 @@ func (te *Executor) memoryEdit(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Update search index with new content
+	// Update search indexes with new content (BM25 always; vector iff enabled).
 	content, readErr := te.memory.Read(args.Path)
 	if readErr == nil {
 		te.index.Update(indexKey(args.Path), content)
+		te.reindexVector(args.Path, content)
 	}
 
 	te.logger.Info("memory edited", "path", args.Path, "replacements", count)
@@ -1942,10 +2035,11 @@ func (te *Executor) memoryAppend(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Update search index with new content
+	// Update search indexes with the full file content after append.
 	content, readErr := te.memory.Read(args.Path)
 	if readErr == nil {
 		te.index.Update(indexKey(args.Path), content)
+		te.reindexVector(args.Path, content)
 	}
 
 	te.logger.Info("memory appended", "path", args.Path, "size", len(args.Content))
@@ -1977,10 +2071,11 @@ func (te *Executor) memoryInsert(argsJSON string) string {
 		return fmt.Sprintf("Error: %s", err)
 	}
 
-	// Update search index with new content
+	// Update search indexes with the full file content after insert.
 	content, readErr := te.memory.Read(args.Path)
 	if readErr == nil {
 		te.index.Update(indexKey(args.Path), content)
+		te.reindexVector(args.Path, content)
 	}
 
 	te.logger.Info("memory insert", "path", args.Path, "at_line", args.Line)

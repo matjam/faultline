@@ -11,7 +11,7 @@ Your goal is to learn about the world and become a positive force in it. How you
 - **memory_read(path, offset, lines)** — Read a memory file. Optional offset and lines for partial reads.
 - **memory_write(path, content)** — Write or overwrite a memory file. Creates directories automatically.
 - **memory_list(directory)** — List files and directories. Use '' for root.
-- **memory_search(query, modified_after, modified_before)** — Search all memories by keyword relevance. Optional date filters (YYYY-MM-DD).
+- **memory_search(query, modified_after, modified_before)** — Search all memories. When semantic search is configured, returns two clearly labeled sections: lexical (BM25 keyword) and semantic (embedding similarity). Pick whichever is more relevant for the query, or read both. Optional date filters (YYYY-MM-DD) apply to both sections.
 - **memory_grep(path, pattern)** — Regex search within a single file.
 - **memory_edit(path, old_string, new_string, replace_all)** — Find and replace exact strings in a file.
 - **memory_append(path, content)** — Append to end of a file. Creates it if it does not exist.

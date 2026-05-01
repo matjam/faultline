@@ -114,6 +114,14 @@ The agent stores knowledge as markdown files in a configurable directory. All fi
 
 An in-memory BM25 search index is built from all memory files on startup and rebuilt during context compaction. The agent uses this to find relevant memories by keyword.
 
+### Semantic Search (optional)
+
+When `[embeddings]` is configured with an OpenAI-compatible endpoint and model, Faultline also embeds every memory file (excluding `prompts/` and `.trash/`) into an in-memory vector index, persisted to `<memory>/.vector/index.bin` in a custom binary format so embeddings aren't recomputed on restart. Memory mutations (write/edit/append/insert/restore) trigger a synchronous re-embed of the affected file. Failures are logged but never block the write — the vector index is best-effort enrichment, not source of truth.
+
+The `memory_search` tool then returns BOTH lexical (BM25) and semantic results in clearly labeled sections per query, so the LLM can pick whichever is more relevant. When embeddings are disabled, `memory_search` falls back to the original BM25-only output. The default model is `text-embedding-3-small` (1536 dim, ~$0.02/1M tokens — indexing 10k typical memory files is ~$0.10 one-time).
+
+If you change the embedding model, the on-disk index records the prior model name and is automatically discarded and rebuilt on next startup.
+
 ### Web Browsing
 
 The agent can fetch web pages, which are converted from HTML to readable markdown text. Results are cached with a TTL to avoid redundant fetches. Long pages can be paginated with offset/length parameters.
@@ -161,7 +169,7 @@ When `[email]` is configured, the agent gets an `email_fetch` tool that opens a 
 | Category | Tools |
 |----------|-------|
 | **Internet** | `web_fetch`, `wiki_fetch` |
-| **Memory** | `memory_read`, `memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`, `memory_list`, `memory_list_trash`, `memory_empty_trash`, `memory_search`, `memory_grep` |
+| **Memory** | `memory_read`, `memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`, `memory_list`, `memory_list_trash`, `memory_empty_trash`, `memory_search` (BM25 + semantic when `[embeddings]` enabled), `memory_grep` |
 | **System** | `context_status`, `get_time`, `sleep`, `send_message`, `get_version` |
 | **Self-update** (when enabled) | `update_check`, `update_apply` |
 | **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |

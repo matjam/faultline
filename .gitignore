@@ -1,1 +1,4 @@
-faultline
+# Built binary at repo root. Anchored with leading slash so the rule
+# doesn't also swallow the cmd/faultline/ source directory or any
+# future "faultline" file/directory deeper in the tree.
+/faultline

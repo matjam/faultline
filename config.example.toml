@@ -211,3 +211,55 @@ memory_search_result_chars = 6000
 # output should be written to /output/ in the script and read back with
 # sandbox_read.
 sandbox_output_chars = 64000
+
+# ---------------------------------------------------------------------------
+# [embeddings] — semantic search (optional).
+#
+# When enabled, every memory file (except .trash/ and prompts/) is embedded
+# via an OpenAI-compatible /v1/embeddings endpoint and stored in an
+# in-memory vector index that is persisted to <memory_dir>/.vector/index.bin
+# in a custom binary format. memory_search then returns BOTH BM25 (lexical)
+# and semantic results in clearly labeled sections so the LLM can pick
+# whichever is more relevant per query.
+#
+# Memory writes (memory_write / edit / append / insert / restore) trigger a
+# synchronous re-embed of the affected file. Per-mutation latency goes up by
+# ~50–200ms but search is always current. Embed failures are logged but do
+# NOT block the memory write — the vector index is best-effort enrichment,
+# not source of truth.
+#
+# Disabled by default. With OpenAI's text-embedding-3-small at $0.02/1M
+# tokens, indexing 10k typical memory files is roughly $0.10 one-time.
+# ---------------------------------------------------------------------------
+[embeddings]
+# Master toggle. When false, no embeddings client is constructed and
+# memory_search is BM25-only. The other fields below are ignored.
+enabled = false
+
+# OpenAI-compatible API base URL ending in /v1. The adapter appends
+# "/embeddings". Works with OpenAI, Ollama, LM Studio, vLLM, and anything
+# else speaking the same wire shape.
+url = "https://api.openai.com/v1"
+
+# Bearer token. Required for OpenAI; leave empty for local servers that
+# don't authenticate. Treat this as a secret — don't commit a populated
+# config.toml.
+api_key = ""
+
+# Embedding model identifier. text-embedding-3-small is OpenAI's current
+# cost/quality sweet spot (1536 dim, $0.02/1M tokens). text-embedding-3-large
+# (3072 dim, $0.13/1M) is overkill for memory search.
+#
+# If you change this, the on-disk vector index records the old model name
+# and will be discarded + rebuilt automatically on next startup.
+model = "text-embedding-3-small"
+
+# Per-request HTTP timeout. Longer than the chat completion default because
+# batch embedding requests can be larger and the API is occasionally slow.
+timeout = "30s"
+
+# Maximum texts per /v1/embeddings call during the startup reconcile pass
+# and any bulk re-indexing. Per-mutation embeds always send a single text
+# and ignore this. OpenAI accepts up to 2048 inputs per call but smaller
+# batches keep individual failures localized.
+batch_size = 100
