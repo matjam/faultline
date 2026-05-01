@@ -202,6 +202,26 @@ func (te *Executor) skillInstall(ctx context.Context, argsJSON string) string {
 		return fmt.Sprintf("Error: SKILL.md frontmatter name %q does not match destination directory name %q. Pass --name=%q (or rename the destination) to install with the spec-mandated matching name.", parsed.Name, desiredName, parsed.Name)
 	}
 
+	// Security audit: spawn an audit subagent to inspect the skill
+	// before committing it to the catalog. Fail-closed: anything
+	// other than an explicit APPROVE aborts the install. The temp
+	// dir is cleaned up by the deferred RemoveAll above.
+	//
+	// Parent ctx (not installCtx) is used so the audit gets its own
+	// budget independent of the download/extract timeout. Audit
+	// internally derives a 15-minute deadline.
+	verdict := te.auditSkill(ctx, parsed.Name, normalisedSource, parsed.Description, skillRoot)
+	if !verdict.Approved {
+		te.logger.Warn("skill audit denied install",
+			"skill", parsed.Name,
+			"source", normalisedSource,
+			"summary", verdict.Summary,
+		)
+		return fmt.Sprintf(
+			"Error: skill audit DENIED installation.\n\nSummary: %s\n\nRationale:\n%s\n\nThe skill has been discarded; the temporary download is being cleaned up. If you believe this is a false positive, review the rationale and consider whether the skill is actually safe.",
+			verdict.Summary, verdict.Rationale)
+	}
+
 	// All-clear: move skillRoot into place. If skillRoot is the temp
 	// dir itself, rename it; otherwise rename the subdir into place
 	// and clean up the temp dir.
@@ -227,9 +247,15 @@ func (te *Executor) skillInstall(ctx context.Context, argsJSON string) string {
 	te.logger.Info("skill_install: ok",
 		slog.String("name", desiredName),
 		slog.String("dest", dest))
+	auditNote := ""
+	if verdict.Skipped {
+		auditNote = " WARNING: security audit was SKIPPED because subagent support is disabled. The skill was installed without an automated security review."
+	} else if verdict.Summary != "" {
+		auditNote = fmt.Sprintf(" Audit approved: %s", verdict.Summary)
+	}
 	return fmt.Sprintf(
-		"Installed skill %q into %s (%d bundled resource files). It is now available via skill_activate.",
-		desiredName, dest, resourceCount)
+		"Installed skill %q into %s (%d bundled resource files). It is now available via skill_activate.%s",
+		desiredName, dest, resourceCount, auditNote)
 }
 
 // detectSourceKind inspects the source URL and the optional explicit
