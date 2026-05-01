@@ -47,6 +47,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Refuse to run as root. The agent has unrestricted access to its
+	// memory store, web fetch, sandbox bind-mounts, and the host
+	// filesystem inside its working directory; running as root means
+	// any prompt-injection or malicious-skill blast radius is the
+	// whole machine. The sandbox security model also depends on
+	// --user <unprivileged>:<unprivileged>, which collapses to root
+	// when os.Getuid()==0.
+	//
+	// Loud-fail on stderr (logger isn't built yet at this point) and
+	// exit non-zero so systemd / docker / k8s see a clear failure
+	// rather than silently downgrading to an insecure run.
+	//
+	// os.Getuid returns -1 on Windows, so this is effectively a
+	// no-op there; faultline isn't a meaningful Windows target.
+	if uid := os.Getuid(); uid == 0 {
+		fmt.Fprintln(os.Stderr, "faultline: refusing to run as root (uid=0). The agent has broad filesystem and network access; running as root means a prompt injection or a malicious skill compromises the whole machine. Run as an unprivileged user (systemd User=, sudo -u <user>, container USER directive, etc.). To override this check intentionally is not supported.")
+		os.Exit(1)
+	}
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Error("failed to load config", "path", *configPath, "error", err)

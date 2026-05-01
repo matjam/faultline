@@ -77,6 +77,20 @@ dependencies = []
 // workDir is the agent's working directory (e.g. /data/faultline).
 // logDir is the directory for sandbox execution logs (e.g. ./logs).
 func New(cfg config.SandboxConfig, workDir, logDir string, logger *slog.Logger) (*Sandbox, error) {
+	// Refuse to construct the sandbox while running as root. Every
+	// `docker run` passes --user <host_uid>:<host_gid>; if the host
+	// uid is 0 the container runs as root, defeating the entire
+	// security model (unprivileged process containment). This is a
+	// loud-fail rather than a silent fall-through to root because
+	// the deployment is misconfigured and the operator needs to know.
+	//
+	// os.Getuid returns -1 on Windows, so this check is effectively
+	// a no-op there; the sandbox doesn't meaningfully support
+	// Windows anyway (no Docker host UID/GID semantics).
+	if uid := os.Getuid(); uid == 0 {
+		return nil, fmt.Errorf("refusing to construct sandbox while running as root: container processes would inherit root via --user 0:0, defeating the unprivileged-execution security model. Run faultline as an unprivileged user (systemd User=, sudo -u <user>, container USER directive, etc.)")
+	}
+
 	dir := cfg.Dir
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(workDir, dir)
@@ -535,6 +549,11 @@ func (s *Sandbox) dockerArgs(needsNetwork bool, containerName string) []string {
 		"--memory", s.memoryLimit,
 		// Run as host user to avoid root-owned files
 		"--user", fmt.Sprintf("%d:%d", s.uid, s.gid),
+		// Block setuid escalation: setuid binaries inside the
+		// container (su, sudo, mount, ...) cannot raise privileges
+		// past whatever --user grants. With --user <unprivileged>
+		// this kills the most obvious in-container escalation path.
+		"--security-opt", "no-new-privileges",
 	}
 
 	if !needsNetwork && !s.network {
@@ -618,6 +637,8 @@ func (s *Sandbox) ExecuteIsolated(ctx context.Context, command string, mounts []
 		"-w", cwd,
 		"--memory", s.memoryLimit,
 		"--user", fmt.Sprintf("%d:%d", s.uid, s.gid),
+		// Same setuid-escalation block as Execute(); see dockerArgs.
+		"--security-opt", "no-new-privileges",
 	}
 	for _, m := range mounts {
 		spec := m.HostPath + ":" + m.ContainerPath

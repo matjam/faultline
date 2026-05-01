@@ -285,7 +285,7 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 `docker.Sandbox` for Docker-backed script execution. The default image (`ghcr.io/matjam/faultline-sandbox`, built from `docker/sandbox/Dockerfile`) is a multi-runtime Arch-based image with Python+pip, uv+uvx, Node+npm+npx, Bun, Deno, Go, and common CLI tools (curl, jq, ripgrep, fd, git, ...). Any image with `sh` and `uv` on PATH satisfies the adapter's contract; the image is configurable per deployment.
 
 - Flat directory layout: `scripts/`, `input/`, `output/` plus a seeded `pyproject.toml`.
-- Ephemeral containers per operation (`docker run --rm`). Host UID/GID mapping for file ownership; image must run as an arbitrary unprivileged UID.
+- Ephemeral containers per operation (`docker run --rm`). Every run passes `--user <host_uid>:<host_gid>` for file ownership and `--security-opt no-new-privileges` to block setuid escalation. The image's Dockerfile additionally bakes in `USER 65532:65532` as a defense-in-depth fallback; if `--user` is ever omitted by a future code path, the container still refuses to run as root. The agent itself refuses to start as root (`os.Getuid()==0` is fatal in `cmd/faultline/main.go` and again in `sandbox.New`).
 - Filenames validated against a strict regex (`^[a-z0-9][a-z0-9._-]*$`).
 - Network access toggleable; memory limits enforced.
 - `sandbox_execute` drives Python via `uv` (`uv sync && uv run python /scripts/X`); `sandbox_shell` runs arbitrary `sh -c` commands so the agent can drive any other runtime on PATH directly.
