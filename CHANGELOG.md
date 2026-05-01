@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0](https://github.com/matjam/faultline/compare/v1.4.0...v1.5.0) (2026-05-01)
+
+
+### Features
+
+* Agent Skills support ([#24](https://github.com/matjam/faultline/issues/24)) ([eaad5a0](https://github.com/matjam/faultline/commit/eaad5a0eb8d43f80c709b97e474f10fe3def3fad))
+* **skills:** security audit subagent + sandbox hardening ([#27](https://github.com/matjam/faultline/issues/27)) ([93515d5](https://github.com/matjam/faultline/commit/93515d58b3dc86f5666f8c9bea6033956704fd7a))
+* subagent delegation ([#26](https://github.com/matjam/faultline/issues/26)) ([c42b698](https://github.com/matjam/faultline/commit/c42b6988b0e537d6e647467acdefef81d9e21b53))
+
 ## [1.4.0](https://github.com/matjam/faultline/compare/v1.3.0...v1.4.0) (2026-05-01)
 
 
