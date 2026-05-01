@@ -576,6 +576,123 @@ func (s *Sandbox) dockerRun(ctx context.Context, needsNetwork bool, command ...s
 }
 
 // ---------------------------------------------------------------------------
+// Isolated execution (used by skill_execute)
+// ---------------------------------------------------------------------------
+
+// Mount describes one bind-mount for ExecuteIsolated. ContainerPath is
+// where the mount appears inside the container; HostPath is the
+// pre-existing host directory or file. ReadOnly = true adds the ":ro"
+// suffix in the docker run argument.
+type Mount struct {
+	HostPath      string
+	ContainerPath string
+	ReadOnly      bool
+}
+
+// ExecuteIsolated runs `sh -c <command>` inside a fresh container with
+// only the supplied mounts -- no /scripts, /input, /output, /venv, or
+// pyproject.toml from the regular sandbox. Used by the skill_execute
+// tool to give each skill a tightly-scoped filesystem view.
+//
+// `cwd` becomes the container's working directory. `network`
+// independently of the sandbox-wide setting controls whether the
+// container can reach the network (skills sometimes legitimately need
+// it; the caller decides). `env` is applied as additional -e flags
+// after the image's baked-in ENV, so callers can override
+// UV_PROJECT_ENVIRONMENT etc. for the skill.
+//
+// `--user UID:GID` and the global timeout/memory limit are still
+// applied, matching the regular sandbox's security posture.
+func (s *Sandbox) ExecuteIsolated(ctx context.Context, command string, mounts []Mount, network bool, cwd string, env map[string]string) (string, error) {
+	if command == "" {
+		return "", fmt.Errorf("command is required")
+	}
+	if cwd == "" {
+		cwd = "/"
+	}
+
+	containerName := "faultline-skill-" + randomID()
+	args := []string{
+		"run", "--rm",
+		"--name", containerName,
+		"-w", cwd,
+		"--memory", s.memoryLimit,
+		"--user", fmt.Sprintf("%d:%d", s.uid, s.gid),
+	}
+	for _, m := range mounts {
+		spec := m.HostPath + ":" + m.ContainerPath
+		if m.ReadOnly {
+			spec += ":ro"
+		} else {
+			spec += ":rw"
+		}
+		args = append(args, "-v", spec)
+	}
+	for k, v := range env {
+		args = append(args, "-e", k+"="+v)
+	}
+	if !network {
+		args = append(args, "--network=none")
+	}
+	args = append(args, s.image, "sh", "-c", command)
+
+	runCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	s.logger.Debug("docker run (isolated)", "container", containerName, "cwd", cwd, "mounts", len(mounts), "network", network)
+	cmd := exec.CommandContext(runCtx, "docker", args...)
+
+	output, err := cmd.CombinedOutput()
+	if runCtx.Err() == context.DeadlineExceeded {
+		s.logger.Warn("isolated sandbox timeout, killing container", "container", containerName)
+		killCmd := exec.Command("docker", "kill", containerName)
+		_ = killCmd.Run()
+		return string(output), fmt.Errorf("execution timed out after %s", s.timeout)
+	}
+	if err != nil {
+		return string(output), fmt.Errorf("docker run failed: %w\nOutput: %s", err, string(output))
+	}
+	return string(output), nil
+}
+
+// Dir returns the absolute host path of the sandbox working
+// directory. Used by callers (e.g. the skill_execute tool) that need
+// to construct sibling paths under the sandbox root.
+func (s *Sandbox) Dir() string {
+	return s.dir
+}
+
+// SkillWorkRoot returns the host directory where per-call /work
+// scratch dirs live. Created lazily; callers should mkdir -p before
+// the first use. The agent loop wipes this on startup to prevent
+// accumulating cruft across restarts.
+func (s *Sandbox) SkillWorkRoot() string {
+	return filepath.Join(s.dir, "skill-work")
+}
+
+// ResetSkillWork wipes and re-creates the skill-work root. Call this
+// at startup so a stale call_id from a previous session can't
+// accidentally resolve. Best-effort: filesystem errors are returned
+// but Faultline can run with skills disabled if this fails.
+func (s *Sandbox) ResetSkillWork() error {
+	root := s.SkillWorkRoot()
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("clear skill-work: %w", err)
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return fmt.Errorf("recreate skill-work: %w", err)
+	}
+	return nil
+}
+
+// Truncate exposes the executor's truncation helper to the tools
+// layer so skill_execute can apply the same output cap as
+// sandbox_execute / sandbox_shell.
+func (s *Sandbox) Truncate(output, suggestion string) string {
+	return s.truncateOutput(output, suggestion)
+}
+
+// ---------------------------------------------------------------------------
 // Script execution
 // ---------------------------------------------------------------------------
 

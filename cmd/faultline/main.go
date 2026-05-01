@@ -23,6 +23,7 @@ import (
 	"github.com/matjam/faultline/internal/adapters/memory/fs"
 	"github.com/matjam/faultline/internal/adapters/operator/telegram"
 	"github.com/matjam/faultline/internal/adapters/sandbox/docker"
+	skillsfs "github.com/matjam/faultline/internal/adapters/skills/fs"
 	"github.com/matjam/faultline/internal/adapters/state/jsonfile"
 	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/config"
@@ -229,7 +230,35 @@ func main() {
 		defer flushVectorIndex(vIndex, vectorPath, logger)
 	}
 
+	// Skills (Agent Skills support, https://agentskills.io). Optional;
+	// when configured but the root directory doesn't exist, the catalog
+	// stays empty and Reload picks up skills the operator adds later.
+	var skillStore *skillsfs.Store
+	if cfg.Skills.Active() {
+		skillStore, err = skillsfs.New(cfg.Skills.Dir, logger)
+		if err != nil {
+			logger.Error("init skills store", "error", err, "dir", cfg.Skills.Dir)
+			os.Exit(1)
+		}
+		logger.Info("skills enabled", "dir", skillStore.Root())
+
+		// Wipe the per-call /work scratch root from the previous
+		// session so stale work_ids issued before a restart can't
+		// resolve. The Sandbox is already constructed at this point
+		// when sandbox is enabled; if it's not, skill_execute will
+		// surface a useful error at call time.
+		if sb != nil {
+			if err := sb.ResetSkillWork(); err != nil {
+				logger.Warn("could not reset skill /work root; stale call_ids may resolve",
+					"error", err)
+			}
+		}
+	} else {
+		logger.Info("skills not configured, skill_* tools disabled")
+	}
+
 	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex,
+		skillStore,
 		cfg.Embeddings.BatchSize, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 	// NOTE: do not defer toolExec.Close() here. The agent owns the tool
@@ -241,6 +270,15 @@ func main() {
 
 	// --- Agent ---------------------------------------------------------
 
+	// Translate the concrete *skillsfs.Store into the agent.Skills
+	// interface. agent.Skills is nil-allowed; the conversion via a
+	// nil typed pointer would create a non-nil interface, which is
+	// the wrong behavior here -- so guard the conversion explicitly.
+	var skillsPort agent.Skills
+	if skillStore != nil {
+		skillsPort = skillStore
+	}
+
 	a := agent.New(cfg, agent.Deps{
 		Chat:      chat,
 		Memory:    memory,
@@ -249,6 +287,7 @@ func main() {
 		Tokenizer: tokenizer,
 		Tools:     toolExec,
 		State:     state,
+		Skills:    skillsPort,
 	}, logger)
 	defer a.Close()
 
