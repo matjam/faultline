@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -36,21 +35,25 @@ func setupMCP(ctx context.Context, cfg config.MCPConfig, logger *slog.Logger) (m
 	var discovered []mcp.DiscoveredServer
 	client := mcp.NewHTTPClient(httpServers, &http.Client{Timeout: 30 * time.Second})
 	for _, server := range httpServers {
+		router.Add(server.Name, client)
 		entry, err := client.Discover(ctx, server.Name)
 		if err != nil {
-			return nil, nil, fmt.Errorf("discover mcp server %q: %w", server.Name, err)
+			logger.Warn("mcp discovery failed", "server", server.Name, "error", err)
+			discovered = append(discovered, mcp.DiscoveredServer{Server: server, DiscoveryError: err.Error()})
+			continue
 		}
-		router.Add(server.Name, client)
 		discovered = append(discovered, entry)
 	}
 
 	stdioClient := mcp.NewStdioClient(stdioServers)
 	for _, server := range stdioServers {
+		router.Add(server.Name, stdioClient)
 		entry, err := stdioClient.Discover(ctx, server.Name)
 		if err != nil {
-			return nil, nil, fmt.Errorf("discover mcp server %q: %w", server.Name, err)
+			logger.Warn("mcp discovery failed", "server", server.Name, "error", err)
+			discovered = append(discovered, mcp.DiscoveredServer{Server: server, DiscoveryError: err.Error()})
+			continue
 		}
-		router.Add(server.Name, stdioClient)
 		discovered = append(discovered, entry)
 	}
 

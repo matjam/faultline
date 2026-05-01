@@ -95,8 +95,9 @@ type DiscoveredTool struct {
 
 // DiscoveredServer pairs a configured server with its discovered tool list.
 type DiscoveredServer struct {
-	Server ServerConfig     `json:"server"`
-	Tools  []DiscoveredTool `json:"tools"`
+	Server         ServerConfig     `json:"server"`
+	Tools          []DiscoveredTool `json:"tools"`
+	DiscoveryError string           `json:"discovery_error,omitempty"`
 }
 
 // ResolvedTool maps a Faultline-prefixed tool name back to its MCP origin.
@@ -108,8 +109,9 @@ type ResolvedTool struct {
 // DiscoveryStatus is safe discovery output. It includes unallowlisted tools
 // for review, but marks them unavailable for ordinary tool calls.
 type DiscoveryStatus struct {
-	Server ServerStatus           `json:"server"`
-	Tools  []DiscoveredToolStatus `json:"tools"`
+	Server         ServerStatus           `json:"server"`
+	Tools          []DiscoveredToolStatus `json:"tools"`
+	DiscoveryError string                 `json:"discovery_error,omitempty"`
 }
 
 // DiscoveredToolStatus is one tool in status/discovery output.
@@ -180,8 +182,9 @@ func (d DiscoveredServer) Status() DiscoveryStatus {
 		})
 	}
 	return DiscoveryStatus{
-		Server: d.Server.Status(),
-		Tools:  tools,
+		Server:         d.Server.Status(),
+		Tools:          tools,
+		DiscoveryError: d.DiscoveryError,
 	}
 }
 

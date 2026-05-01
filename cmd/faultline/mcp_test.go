@@ -144,3 +144,46 @@ func TestSetupMCPDiscoversHTTPServers(t *testing.T) {
 		t.Fatalf("len(tools) = %d, want 2", len(discovered[0].Tools))
 	}
 }
+
+func TestSetupMCPKeepsServerWhenDiscoveryFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	server.Close()
+
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(`{
+		"servers": [
+			{
+				"name": "genie",
+				"transport": "http",
+				"url": "`+server.URL+`"
+			}
+		]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
+		Enabled:    true,
+		ConfigFile: path,
+	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("setupMCP: %v", err)
+	}
+	if caller == nil {
+		t.Fatal("expected caller when MCP enabled")
+	}
+	if len(discovered) != 1 {
+		t.Fatalf("len(discovered) = %d, want 1", len(discovered))
+	}
+	if discovered[0].Server.Name != "genie" {
+		t.Fatalf("server name = %q, want genie", discovered[0].Server.Name)
+	}
+	if discovered[0].DiscoveryError == "" {
+		t.Fatal("expected discovery error to be recorded")
+	}
+	if len(discovered[0].Tools) != 0 {
+		t.Fatalf("len(tools) = %d, want 0", len(discovered[0].Tools))
+	}
+}
