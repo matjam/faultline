@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0](https://github.com/matjam/faultline/compare/v1.1.0...v1.2.0) (2026-05-01)
+
+
+### Features
+
+* add rebuild_indexes tool and refactor reconcile/rebuild helpers ([27aea57](https://github.com/matjam/faultline/commit/27aea575d51f7509af3697e878a81b75f40f03e9))
+* add semantic memory search with persisted vector index ([ff012dc](https://github.com/matjam/faultline/commit/ff012dc0f08ffe7eb62afbf4b2e6bec5d1898fba))
+* add semantic memory search with persisted vector index ([6265089](https://github.com/matjam/faultline/commit/62650891ae24f9c555af3a3f129ea94bdbb21225))
+
 ## [1.1.0](https://github.com/matjam/faultline/compare/v1.0.0...v1.1.0) (2026-05-01)
 
 
