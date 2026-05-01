@@ -313,3 +313,69 @@ dir = "./skills"
 # the standard sandbox feature -- skill_execute still runs every script
 # in an isolated container with only the skill's own directory mounted.
 install_enabled = false
+
+# ---------------------------------------------------------------------------
+# [subagent] — subagent delegation.
+#
+# When enabled, the primary agent gains four tools: subagent_run (sync,
+# returns the report inline), subagent_spawn (async, report arrives via
+# the same injection point as operator messages), subagent_status (list
+# active spawned children), and subagent_cancel (abort a running child).
+#
+# Each subagent is a fresh agent loop with its own context window and
+# its own LLM client (selected from the configured profiles, or the
+# synthesized "default" profile that inherits from [api]). The primary
+# supplies all the context the child needs as the prompt; the child has
+# no view of the primary's conversation log.
+#
+# Subagents share the primary's memory store, search indexes, sandbox,
+# and skills. They DO NOT inherit the operator (Telegram) channel and
+# they cannot themselves spawn further subagents. Their conversation
+# logs are not persisted across restarts.
+# ---------------------------------------------------------------------------
+[subagent]
+enabled = false
+
+# Cap on simultaneous async (spawned) subagents. Sync (run) subagents
+# don't count -- the primary's tool dispatch is blocked while one
+# is in flight, so at most one sync child exists per primary at any
+# given time.
+max_concurrent = 4
+
+# Cap on a single subagent's loop iterations. The child is told via
+# system prompt to call subagent_report when finished; if it exhausts
+# this budget without reporting, its last assistant text is returned
+# with a truncation notice.
+max_turns_per_run = 50
+
+# Cap on completed async reports queued for the primary to drain.
+# When full, the oldest is dropped with a warning.
+max_inbox = 32
+
+# Wall-clock cap on a single subagent run (sync or async).
+run_timeout = "30m"
+
+# ---------------------------------------------------------------------------
+# Subagent profiles. Each profile is a callable target the primary may
+# select by name. Use as many [[subagent.profiles]] blocks as you need.
+# The reserved name "default" is synthesized from the primary's [api]
+# settings and is always available; operator profiles must use a
+# different name.
+#
+# Sampler fields use zero-value-omitted semantics: a field set to 0 (or
+# omitted entirely) inherits from the primary's [agent] section.
+# ---------------------------------------------------------------------------
+# [[subagent.profiles]]
+# name = "fast"
+# api_url = "http://localhost:5001/v1"
+# api_key = ""
+# model = "qwen2.5-coder-7b"
+# purpose = "Quick lookups and short summaries; cheap and fast."
+# temperature = 0.4
+#
+# [[subagent.profiles]]
+# name = "deep"
+# api_url = "https://api.openai.com/v1"
+# api_key = "sk-..."
+# model = "gpt-4o"
+# purpose = "Deep research, architecture analysis, careful reasoning. Slow."

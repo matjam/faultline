@@ -30,6 +30,13 @@ type Config struct {
 	// and on every context rebuild, injects a tier-1 catalog into the
 	// system prompt, and advertises skill_* tools.
 	Skills SkillsConfig `toml:"skills"`
+
+	// Subagent is optional; when Enabled, the primary agent gains
+	// the subagent_run/spawn/status/cancel tools and can delegate
+	// isolated work to child agent loops. Profiles configure
+	// alternative LLM endpoints; the synthesized "default" profile
+	// (matching [api]) is always available when Enabled is true.
+	Subagent SubagentConfig `toml:"subagent"`
 }
 
 // APIConfig holds LLM API connection settings.
@@ -270,6 +277,93 @@ func (s SkillsConfig) Active() bool {
 	return s.Enabled && s.Dir != ""
 }
 
+// SubagentConfig holds settings for subagent delegation. When
+// Enabled, the primary agent gains four tools (subagent_run,
+// subagent_spawn, subagent_status, subagent_cancel) and may
+// dispatch work to child agent loops running under the configured
+// Profiles, or under a synthesized "default" profile that inherits
+// the primary's [api] / [agent] settings.
+//
+// Subagents share the primary's memory store, indexes, sandbox,
+// and skills; they do NOT inherit the operator (Telegram) port or
+// the conversation state file, and they cannot themselves spawn
+// further subagents (no nesting).
+type SubagentConfig struct {
+	// Enabled toggles the entire feature.
+	Enabled bool `toml:"enabled"`
+
+	// Profiles is the operator-supplied list of LLM-endpoint
+	// profiles the primary may pick when delegating. The reserved
+	// name "default" is synthesized at runtime from [api] / [agent]
+	// and is always available when Enabled is true; operator
+	// profiles must use a different name.
+	Profiles []SubagentProfile `toml:"profiles"`
+
+	// MaxConcurrent caps the number of asynchronous (spawned)
+	// subagents that may run at the same time. Synchronous (run)
+	// subagents are uncounted -- the primary's tool dispatch is
+	// blocked while one is running, so at most one sync child
+	// exists per primary. Defaults to 4.
+	MaxConcurrent int `toml:"max_concurrent"`
+
+	// MaxTurnsPerRun caps the child agent's loop iterations to
+	// bound runaway. The child's system prompt instructs it to
+	// call subagent_report when finished; if it exhausts this
+	// budget without reporting, its last assistant text is
+	// returned with Truncated=true. Defaults to 50.
+	MaxTurnsPerRun int `toml:"max_turns_per_run"`
+
+	// MaxInbox caps the number of completed async reports queued
+	// for the primary to drain. When full, the oldest report is
+	// dropped with a warning log. Defaults to 32.
+	MaxInbox int `toml:"max_inbox"`
+
+	// RunTimeout is the wall-clock cap on a single subagent run.
+	// Defaults to 30m. Zero or negative falls back to the default;
+	// a deliberately huge value disables the cap in practice.
+	RunTimeout duration `toml:"run_timeout"`
+}
+
+// SubagentProfile is one operator-configured execution profile.
+// Sampler fields use zero-value-omitted semantics matching
+// AgentConfig: zero means "inherit the primary's [agent] value",
+// non-zero overrides it.
+type SubagentProfile struct {
+	// Name is the profile identifier, advertised to the primary
+	// agent as a callable target. Lowercase letters/digits/hyphens,
+	// 1-32 chars, not "default".
+	Name string `toml:"name"`
+
+	// APIURL is the OpenAI-compatible chat-completions base URL
+	// (ending in /v1, no trailing slash). Required.
+	APIURL string `toml:"api_url"`
+
+	// APIKey is sent as a Bearer token. May be empty for local
+	// servers that don't authenticate.
+	APIKey string `toml:"api_key"`
+
+	// Model is the model identifier. Required.
+	Model string `toml:"model"`
+
+	// Purpose is operator-supplied free-form text explaining when
+	// the primary should pick this profile. Rendered in the
+	// primary's system prompt next to the profile name.
+	Purpose string `toml:"purpose"`
+
+	// Sampler overrides; zero inherits from [agent].
+	Temperature       float32 `toml:"temperature"`
+	TopP              float32 `toml:"top_p"`
+	TopK              int     `toml:"top_k"`
+	MinP              float32 `toml:"min_p"`
+	RepetitionPenalty float32 `toml:"repetition_penalty"`
+	MaxRespTokens     int     `toml:"max_response_tokens"`
+}
+
+// Active reports whether subagent support is wired up.
+func (s SubagentConfig) Active() bool {
+	return s.Enabled
+}
+
 // EmailConfig holds optional IMAP email connection settings.
 type EmailConfig struct {
 	Host     string `toml:"host"`
@@ -359,6 +453,13 @@ func Default() *Config {
 			Enabled: false,
 			Dir:     "./skills",
 		},
+		Subagent: SubagentConfig{
+			Enabled:        false,
+			MaxConcurrent:  4,
+			MaxTurnsPerRun: 50,
+			MaxInbox:       32,
+			RunTimeout:     duration(30 * time.Minute),
+		},
 	}
 }
 
@@ -396,6 +497,21 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Embeddings.BatchSize <= 0 {
 		cfg.Embeddings.BatchSize = 100
+	}
+
+	// Subagent caps: backfill defaults for any zero values when the
+	// operator enables the feature but doesn't override the caps.
+	if cfg.Subagent.MaxConcurrent <= 0 {
+		cfg.Subagent.MaxConcurrent = 4
+	}
+	if cfg.Subagent.MaxTurnsPerRun <= 0 {
+		cfg.Subagent.MaxTurnsPerRun = 50
+	}
+	if cfg.Subagent.MaxInbox <= 0 {
+		cfg.Subagent.MaxInbox = 32
+	}
+	if cfg.Subagent.RunTimeout.Duration() <= 0 {
+		cfg.Subagent.RunTimeout = duration(30 * time.Minute)
 	}
 
 	return cfg, nil

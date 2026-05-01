@@ -7,11 +7,12 @@ import (
 
 	"github.com/matjam/faultline/internal/search/bm25"
 	"github.com/matjam/faultline/internal/skills"
+	"github.com/matjam/faultline/internal/subagent"
 )
 
 func TestBuildCycleContext_NoMemories(t *testing.T) {
 	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
-	got := BuildCycleContext("SYSTEM PROMPT", nil, nil, now, 2000)
+	got := BuildCycleContext("SYSTEM PROMPT", nil, nil, nil, now, 2000)
 
 	if !strings.Contains(got, "SYSTEM PROMPT") {
 		t.Error("output missing system prompt")
@@ -25,6 +26,9 @@ func TestBuildCycleContext_NoMemories(t *testing.T) {
 	if strings.Contains(got, "Available Skills") {
 		t.Error("output should not have Available Skills section when no skills provided")
 	}
+	if strings.Contains(got, "Subagent Profiles") {
+		t.Error("output should not have Subagent Profiles section when no profiles provided")
+	}
 }
 
 func TestBuildCycleContext_WithMemories(t *testing.T) {
@@ -33,7 +37,7 @@ func TestBuildCycleContext_WithMemories(t *testing.T) {
 		{Path: "alpha.md", Content: "alpha content"},
 		{Path: "beta.md", Content: "beta content"},
 	}
-	got := BuildCycleContext("SYS", mems, nil, now, 2000)
+	got := BuildCycleContext("SYS", mems, nil, nil, now, 2000)
 
 	if !strings.Contains(got, "Recent Memories") {
 		t.Error("missing Recent Memories header")
@@ -52,7 +56,7 @@ func TestBuildCycleContext_WithMemories(t *testing.T) {
 func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 	long := strings.Repeat("x", 3000)
 	mems := []bm25.Result{{Path: "long.md", Content: long}}
-	got := BuildCycleContext("SYS", mems, nil, time.Now(), 2000)
+	got := BuildCycleContext("SYS", mems, nil, nil, time.Now(), 2000)
 
 	if !strings.Contains(got, "[truncated") {
 		t.Error("expected truncation marker for long memory")
@@ -74,7 +78,7 @@ func TestBuildCycleContext_TruncatesLongMemory(t *testing.T) {
 func TestBuildCycleContext_NoLimitKeepsFullContent(t *testing.T) {
 	long := strings.Repeat("x", 3000)
 	mems := []bm25.Result{{Path: "long.md", Content: long}}
-	got := BuildCycleContext("SYS", mems, nil, time.Now(), 0)
+	got := BuildCycleContext("SYS", mems, nil, nil, time.Now(), 0)
 
 	if strings.Contains(got, "[truncated") {
 		t.Error("did not expect truncation marker when limit is disabled")
@@ -89,7 +93,7 @@ func TestBuildCycleContext_WithSkills(t *testing.T) {
 		{Name: "pdf-processing", Description: "Handle PDFs."},
 		{Name: "data-analysis", Description: "Analyze datasets."},
 	}
-	got := BuildCycleContext("SYS", nil, cat, time.Now(), 2000)
+	got := BuildCycleContext("SYS", nil, cat, nil, time.Now(), 2000)
 
 	if !strings.Contains(got, "## Available Skills") {
 		t.Error("missing Available Skills header")
@@ -108,7 +112,7 @@ func TestBuildCycleContext_WithSkills(t *testing.T) {
 func TestBuildCycleContext_SkillsAndMemoriesTogether(t *testing.T) {
 	cat := []skills.Skill{{Name: "x", Description: "x."}}
 	mems := []bm25.Result{{Path: "m.md", Content: "memory body"}}
-	got := BuildCycleContext("SYS", mems, cat, time.Now(), 2000)
+	got := BuildCycleContext("SYS", mems, cat, nil, time.Now(), 2000)
 
 	skillsIdx := strings.Index(got, "## Available Skills")
 	memIdx := strings.Index(got, "## Recent Memories")
@@ -117,5 +121,43 @@ func TestBuildCycleContext_SkillsAndMemoriesTogether(t *testing.T) {
 	}
 	if skillsIdx > memIdx {
 		t.Error("skills section should appear before memories")
+	}
+}
+
+func TestBuildCycleContext_WithSubagents(t *testing.T) {
+	cat := []subagent.Catalog{
+		{Name: "fast", Purpose: "Quick lookups."},
+		{Name: "deep", Purpose: "Architecture analysis."},
+	}
+	got := BuildCycleContext("SYS", nil, nil, cat, time.Now(), 2000)
+
+	if !strings.Contains(got, "## Available Subagent Profiles") {
+		t.Error("missing Subagent Profiles header")
+	}
+	if !strings.Contains(got, "**fast**: Quick lookups.") {
+		t.Errorf("missing fast entry; got %q", got)
+	}
+	if !strings.Contains(got, "**deep**: Architecture analysis.") {
+		t.Error("missing deep entry")
+	}
+	if !strings.Contains(got, "subagent_run") {
+		t.Error("missing subagent_run instruction")
+	}
+}
+
+func TestBuildCycleContext_SubagentsAfterSkills(t *testing.T) {
+	skl := []skills.Skill{{Name: "x", Description: "x."}}
+	sub := []subagent.Catalog{{Name: "fast", Purpose: "y"}}
+	mems := []bm25.Result{{Path: "m.md", Content: "memory body"}}
+	got := BuildCycleContext("SYS", mems, skl, sub, time.Now(), 2000)
+
+	skillsIdx := strings.Index(got, "## Available Skills")
+	subIdx := strings.Index(got, "## Available Subagent Profiles")
+	memIdx := strings.Index(got, "## Recent Memories")
+	if skillsIdx < 0 || subIdx < 0 || memIdx < 0 {
+		t.Fatalf("missing sections: skills=%d sub=%d mem=%d", skillsIdx, subIdx, memIdx)
+	}
+	if skillsIdx >= subIdx || subIdx >= memIdx {
+		t.Errorf("expected order skills -> subagent -> memories; got %d, %d, %d", skillsIdx, subIdx, memIdx)
 	}
 }

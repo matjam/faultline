@@ -29,7 +29,17 @@ type ChatLogger struct {
 // NewChatLogger returns a logger that writes to dir/chat-YYYY-MM-DD.log.
 // Directory creation and rotation are handled by the writer.
 func NewChatLogger(dir string) (*ChatLogger, error) {
-	w, err := log.NewDailyPrefixed(dir, "chat-")
+	return NewChatLoggerPrefixed(dir, "chat-")
+}
+
+// NewChatLoggerPrefixed returns a logger that writes to
+// dir/<prefix>YYYY-MM-DD.log. Used by subagents so each child agent
+// gets its own daily-rotated transcript file (e.g. chat-sub-<id>-)
+// rather than interleaving with the primary's chat log. The prefix
+// must end in a separator the filename can carry; convention is to
+// end it with a hyphen.
+func NewChatLoggerPrefixed(dir, prefix string) (*ChatLogger, error) {
+	w, err := log.NewDailyPrefixed(dir, prefix)
 	if err != nil {
 		return nil, err
 	}

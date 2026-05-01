@@ -17,7 +17,8 @@ faultline/
                               detection, graceful shutdown
       ports.go                interfaces the agent depends on:
                               ChatModel, Memory, Searcher, Operator,
-                              Tokenizer, Tools, StateStore
+                              Tokenizer, Tools, StateStore, Skills,
+                              Subagents
     config/                   TOML config loading
     log/                      DailyFileWriter, MultiHandler (slog)
     prompts/                  embedded prompt templates, Load, LoadAll,
@@ -31,6 +32,11 @@ faultline/
     search/bm25/              pure-Go BM25 search index
     search/vector/            pure-Go in-memory vector index + binary
                               serialization (FVEC v1) for semantic search
+    skills/                   domain types for Agent Skills (Skill, Catalog,
+                              Validate*) — adapter is in adapters/skills/fs
+    subagent/                 domain types + Manager for subagent delegation
+                              (Profile, Report, ActiveStatus); spawnFn
+                              bridge to composition lives in cmd/faultline
     llm/                      shared LLM types (Message, Tool, ChatRequest, ...)
                               + heuristic token estimator
     adapters/
@@ -110,8 +116,19 @@ cmd/faultline/main.go
         |     +-> rebuild_indexes  (force full rebuild of bm25 and/or vector index;
         |                            shared helper in tools/vector.go also drives
         |                            startup reconcile from main.go)
+        |     +-> subagent_run     (sync; subagent.Manager.Run; child agent loop
+        |                            via spawnFn closure in cmd/faultline)
+        |     +-> subagent_spawn   (async; returns work_id; report lands in
+        |                            inbox alongside operator queue)
+        |     +-> subagent_wait    (block until named subagent reports;
+        |                            wakes on operator HasPending)
+        |     +-> subagent_status  (active children with elapsed/prompt preview)
+        |     +-> subagent_cancel  (cooperative cancel via child ctx)
+        |     +-> subagent_report  (child-only; sink closure captures text +
+        |                            calls childAgent.RequestStop)
         |
         +-> Graceful shutdown (on first SIGINT)
+              +-> Subagents.CancelAll (children's goroutines unwind)
               +-> Inject shutdown prompt
               +-> Agent saves state (up to 10 turns, 2min timeout)
 ```
@@ -149,6 +166,7 @@ The hexagon. Pure domain logic with no I/O outside what the ports allow.
   | `Tools` | `*tools.Executor` | ToolDefs, Execute, SetContextInfo, Close. |
   | `StateStore` | `*jsonfile.Persister` | Save/Load conversation log; binds path + logger at construction. |
   | `Skills` | `*skillsfs.Store` | nil-allowed; List/Reload for the tier-1 catalog injection in `BuildCycleContext`. Tools layer drives the rest. |
+  | `Subagents` | `*subagent.Manager` | nil-allowed; Pending/HasPending drive the inbox drain in `injectPendingMessages` (parallel to operator), Profiles feeds the system-prompt catalog, CancelAll fires from `gracefulSave`. Tools layer holds the same pointer for `subagent_run/spawn/wait/status/cancel`. |
 
 ### internal/config/
 
