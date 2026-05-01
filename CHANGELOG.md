@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/matjam/faultline/compare/v1.2.0...v1.3.0) (2026-05-01)
+
+
+### Features
+
+* paragraph-aligned semantic indexing with adaptive batching ([#19](https://github.com/matjam/faultline/issues/19)) ([e5d7918](https://github.com/matjam/faultline/commit/e5d7918539d43b80f499101538c171c237e1bcc5))
+
 ## [1.2.0](https://github.com/matjam/faultline/compare/v1.1.0...v1.2.0) (2026-05-01)
 
 
