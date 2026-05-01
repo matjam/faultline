@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	openaiembed "github.com/matjam/faultline/internal/adapters/embeddings/openai"
@@ -89,131 +88,14 @@ func setupEmbeddings(ctx context.Context, cfg *config.Config, memory *fs.Store, 
 
 	// Reconcile: embed any memory file that's not in the index.
 	// Skipped for files in operational paths (prompts/, .trash/).
-	if err := reconcileVectorIndex(ctx, client, idx, memory, cfg.Embeddings.BatchSize, logger); err != nil {
+	// The shared helper in internal/tools is also used by the
+	// rebuild_indexes tool with full-rebuild semantics.
+	if _, err := tools.ReconcileVectorIndex(ctx, client, idx, memory, cfg.Embeddings.BatchSize, logger); err != nil {
 		logger.Warn("embeddings: reconcile incomplete; continuing with partial index",
 			slog.String("err", err.Error()))
 	}
 
 	return client, idx
-}
-
-// reconcileVectorIndex finds memory files lacking a vector and embeds
-// them in batches. Files larger than the per-input cap are truncated
-// (see tools/vector.go for the cap). Empty files are skipped.
-//
-// Returns the first error encountered; partial progress is preserved
-// in the index either way.
-func reconcileVectorIndex(ctx context.Context, embedder tools.Embedder, idx *vector.Index, memory *fs.Store, batchSize int, logger *slog.Logger) error {
-	all, err := memory.AllFiles()
-	if err != nil {
-		return fmt.Errorf("list memory files: %w", err)
-	}
-
-	type pending struct {
-		path string
-		text string
-	}
-	var queue []pending
-
-	for path, content := range all {
-		if !shouldReconcile(path) {
-			continue
-		}
-		if idx.Has(path) {
-			continue
-		}
-		text := strings.TrimSpace(content)
-		if text == "" {
-			continue
-		}
-		// Mirror the cap applied by tool-side reindex so reconciled
-		// vectors are produced from the same prefix of content.
-		if len(text) > 30000 {
-			text = text[:30000]
-		}
-		queue = append(queue, pending{path: path, text: text})
-	}
-
-	if len(queue) == 0 {
-		logger.Info("embeddings: index is up to date, nothing to reconcile")
-		return nil
-	}
-
-	logger.Info("embeddings: reconcile pass embedding missing files",
-		slog.Int("count", len(queue)),
-		slog.Int("batch_size", batchSize))
-
-	if batchSize <= 0 {
-		batchSize = 100
-	}
-
-	embedded := 0
-	for i := 0; i < len(queue); i += batchSize {
-		end := i + batchSize
-		if end > len(queue) {
-			end = len(queue)
-		}
-		batch := queue[i:end]
-
-		texts := make([]string, len(batch))
-		for j, p := range batch {
-			texts[j] = p.text
-		}
-
-		// Each batch gets a fresh context derived from ctx so a
-		// hung server can't stall reconcile indefinitely.
-		batchCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		vecs, err := embedder.Embed(batchCtx, texts)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("embed batch starting at %d: %w", i, err)
-		}
-		if len(vecs) != len(batch) {
-			return fmt.Errorf("embed batch starting at %d: got %d vecs for %d inputs", i, len(vecs), len(batch))
-		}
-		for j, p := range batch {
-			if err := idx.Upsert(p.path, vecs[j]); err != nil {
-				logger.Warn("embeddings: reconcile upsert failed; continuing",
-					slog.String("path", p.path),
-					slog.String("err", err.Error()))
-				continue
-			}
-			embedded++
-		}
-
-		// Bail out early on cancellation (graceful shutdown) so we
-		// don't keep hammering the API for files the operator no
-		// longer cares about.
-		select {
-		case <-ctx.Done():
-			logger.Info("embeddings: reconcile canceled mid-pass",
-				slog.Int("embedded", embedded),
-				slog.Int("total", len(queue)))
-			return ctx.Err()
-		default:
-		}
-	}
-
-	logger.Info("embeddings: reconcile complete",
-		slog.Int("embedded", embedded),
-		slog.Int("total", len(queue)))
-	return nil
-}
-
-// shouldReconcile mirrors tools.shouldIndexPath. Duplicated here
-// because main can't import tools internals; keep the two predicates
-// in sync if either is updated.
-func shouldReconcile(path string) bool {
-	if path == "" {
-		return false
-	}
-	if strings.HasPrefix(path, "prompts/") || path == "prompts" {
-		return false
-	}
-	if fs.IsTrashPath(path) {
-		return false
-	}
-	return true
 }
 
 // runVectorPersistence flushes the index to disk every

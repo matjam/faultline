@@ -170,7 +170,7 @@ When `[email]` is configured, the agent gets an `email_fetch` tool that opens a 
 |----------|-------|
 | **Internet** | `web_fetch`, `wiki_fetch` |
 | **Memory** | `memory_read`, `memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`, `memory_list`, `memory_list_trash`, `memory_empty_trash`, `memory_search` (BM25 + semantic when `[embeddings]` enabled), `memory_grep` |
-| **System** | `context_status`, `get_time`, `sleep`, `send_message`, `get_version` |
+| **System** | `context_status`, `get_time`, `sleep`, `send_message`, `get_version`, `rebuild_indexes` |
 | **Self-update** (when enabled) | `update_check`, `update_apply` |
 | **Sandbox** (when enabled) | `sandbox_write`, `sandbox_read`, `sandbox_edit`, `sandbox_append`, `sandbox_insert`, `sandbox_delete`, `sandbox_rename`, `sandbox_list`, `sandbox_execute`, `sandbox_shell`, `sandbox_install_package`, `sandbox_upgrade_package`, `sandbox_remove_package`, `sandbox_list_packages` |
 | **Email** (when configured) | `email_fetch` |

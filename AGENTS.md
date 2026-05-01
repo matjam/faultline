@@ -93,6 +93,9 @@ cmd/faultline/main.go
         |     +-> context_status   (token usage + kobold.Client.Perf if detected)
         |     +-> get_time         (current timestamp)
         |     +-> sleep            (suspend N seconds, interrupted by operator messages)
+        |     +-> rebuild_indexes  (force full rebuild of bm25 and/or vector index;
+        |                            shared helper in tools/vector.go also drives
+        |                            startup reconcile from main.go)
         |
         +-> Graceful shutdown (on first SIGINT)
               +-> Inject shutdown prompt
@@ -163,7 +166,13 @@ The Executor depends on adapter packages directly (memory/fs, sandbox/docker, op
 
 ### internal/search/bm25/
 
-Pure-Go BM25 search index. `bm25.Index` (with `Build`, `Update`, `Remove`, `RemovePrefix`, `Search`) and `bm25.Result` (path/content/score). Standard k1=1.5, b=0.75. In-memory only -- rebuilt from disk on startup and after each context compaction.
+Pure-Go BM25 search index. `bm25.Index` (with `Build`, `Update`, `Remove`, `RemovePrefix`, `Search`) and `bm25.Result` (path/content/score). Standard k1=1.5, b=0.75. In-memory only.
+
+Lifecycle:
+- **Built from disk on startup** in `agent.initializeContext` via `Build(memory.AllFiles())`.
+- **Rebuilt after every context compaction** in `agent.rebuildContext` (same `Build` call) — guards against drift accumulating across long-running sessions.
+- **Updated incrementally on every memory mutation** (`memory_write`, `memory_edit`, `memory_append`, `memory_insert`, `memory_delete`, `memory_move`, `memory_restore`) by the tool dispatcher. The index is always in sync with on-disk memory between rebuilds.
+- **Force-rebuildable on demand** via the `rebuild_indexes` tool, which the LLM is told to use only when the operator asks or when it observes inconsistency between search results and known disk state.
 
 `bm25.Result` is also reused by the memory adapter for non-scored returns (RecentFiles, AllFiles); Score is left at zero in those cases. This is a small shared type, not a violation of the dependency direction (memory imports bm25, never the reverse).
 

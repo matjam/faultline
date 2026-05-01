@@ -229,7 +229,8 @@ func main() {
 		defer flushVectorIndex(vIndex, vectorPath, logger)
 	}
 
-	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex, logger,
+	toolExec := tools.New(memory, index, tg, sb, email, kb, updater, embedder, vIndex,
+		cfg.Embeddings.BatchSize, logger,
 		cfg.Agent.MaxTokens, cfg.Limits, cfg.Agent.MaxSleep.Duration())
 	defer toolExec.Close()
 

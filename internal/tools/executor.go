@@ -520,6 +520,35 @@ func (te *Executor) ToolDefs() []llm.Tool {
 				},
 			},
 		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name: "rebuild_indexes",
+				Description: "Force a full rebuild of memory search indexes from the current state of disk. " +
+					"Both the BM25 lexical index and (when semantic search is configured) the vector index are normally " +
+					"kept in sync incrementally on every memory mutation, plus BM25 is rebuilt automatically on every " +
+					"context compaction. You should NOT call this tool routinely.\n\n" +
+					"Use it ONLY when:\n" +
+					"  - The operator/collaborator explicitly asks you to rebuild the indexes.\n" +
+					"  - You observe a clear inconsistency between memory_search results and known disk state " +
+					"(e.g. a file you just wrote isn't appearing, or search returns a path you've already deleted).\n\n" +
+					"BM25 rebuild is fast (milliseconds) and free. Vector rebuild re-embeds every eligible memory " +
+					"file via the embeddings API; this can take seconds to minutes depending on memory size and " +
+					"throughput, and incurs API cost on paid endpoints. Choose 'lexical' if you only suspect the " +
+					"BM25 index is wrong; 'semantic' if you only suspect the vector index is wrong; 'all' if both " +
+					"or you're unsure. The tool returns counts, timing, and any error encountered.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"scope": map[string]interface{}{
+							"type":        "string",
+							"description": "Which indexes to rebuild. 'all' rebuilds both. 'lexical' rebuilds BM25 only. 'semantic' rebuilds the vector index only.",
+							"enum":        []string{"all", "lexical", "semantic"},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	// update_check / update_apply only when self-update is enabled in
@@ -934,46 +963,51 @@ func indexKey(path string) string {
 
 // Executor handles executing tool calls.
 type Executor struct {
-	memory        *fs.Store
-	index         *bm25.Index
-	telegram      *telegram.Bot
-	sandbox       *docker.Sandbox
-	email         *config.EmailConfig
-	kobold        *kobold.Client  // optional; nil means no perf info in context_status
-	updater       *update.Updater // optional; always non-nil but Enabled() may be false
-	embedder      Embedder        // optional; nil means semantic search disabled
-	vIndex        *vector.Index   // optional; nil means semantic search disabled
-	logger        *slog.Logger
-	http          *http.Client
-	cache         *webCache
-	maxTokens     int
-	currentTokens int
-	limits        config.LimitsConfig
-	maxSleep      time.Duration // upper bound for the `sleep` tool
+	memory         *fs.Store
+	index          *bm25.Index
+	telegram       *telegram.Bot
+	sandbox        *docker.Sandbox
+	email          *config.EmailConfig
+	kobold         *kobold.Client  // optional; nil means no perf info in context_status
+	updater        *update.Updater // optional; always non-nil but Enabled() may be false
+	embedder       Embedder        // optional; nil means semantic search disabled
+	vIndex         *vector.Index   // optional; nil means semantic search disabled
+	embedBatchSize int             // batch size for bulk embed calls (rebuild_indexes); 0 -> default
+	logger         *slog.Logger
+	http           *http.Client
+	cache          *webCache
+	maxTokens      int
+	currentTokens  int
+	limits         config.LimitsConfig
+	maxSleep       time.Duration // upper bound for the `sleep` tool
 }
 
 // New creates a new tool executor. kb, embedder, and vIndex may be nil.
 // embedder and vIndex must be both nil (feature off) or both non-nil
 // (feature on); main.go is responsible for that pairing.
-func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
+//
+// embedBatchSize is the batch size used by the rebuild_indexes tool;
+// values <= 0 fall back to a sensible default inside the build helper.
+func New(memory *fs.Store, index *bm25.Index, tg *telegram.Bot, sb *docker.Sandbox, email *config.EmailConfig, kb *kobold.Client, updater *update.Updater, embedder Embedder, vIndex *vector.Index, embedBatchSize int, logger *slog.Logger, maxTokens int, limits config.LimitsConfig, maxSleep time.Duration) *Executor {
 	if sb != nil {
 		sb.SetOutputLimit(limits.SandboxOutputChars)
 	}
 	return &Executor{
-		memory:    memory,
-		index:     index,
-		telegram:  tg,
-		sandbox:   sb,
-		email:     email,
-		kobold:    kb,
-		updater:   updater,
-		embedder:  embedder,
-		vIndex:    vIndex,
-		logger:    logger,
-		maxTokens: maxTokens,
-		limits:    limits,
-		maxSleep:  maxSleep,
-		cache:     newWebCache(60 * time.Second),
+		memory:         memory,
+		index:          index,
+		telegram:       tg,
+		sandbox:        sb,
+		email:          email,
+		kobold:         kb,
+		updater:        updater,
+		embedder:       embedder,
+		vIndex:         vIndex,
+		embedBatchSize: embedBatchSize,
+		logger:         logger,
+		maxTokens:      maxTokens,
+		limits:         limits,
+		maxSleep:       maxSleep,
+		cache:          newWebCache(60 * time.Second),
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -1064,6 +1098,8 @@ func (te *Executor) Execute(ctx context.Context, call llm.ToolCall) string {
 		return te.sleep(ctx, args)
 	case "get_version":
 		return te.getVersion()
+	case "rebuild_indexes":
+		return te.rebuildIndexes(ctx, args)
 	case "update_check":
 		return te.updateCheck(ctx)
 	case "update_apply":
