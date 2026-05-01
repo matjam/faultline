@@ -1,0 +1,76 @@
+# goreleaser v2 configuration. Triggered from
+# .github/workflows/release.yml on every tag push (vX.Y.Z).
+#
+# release-please owns the changelog (writes it into the GitHub release
+# body when it cuts the tag); goreleaser only attaches binaries +
+# checksums to the release that already exists.
+#
+# Local dry-run:    goreleaser release --snapshot --clean
+# Local check:      goreleaser check
+version: 2
+
+project_name: faultline
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: faultline
+    main: ./cmd/faultline
+    binary: faultline
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Skip Intel macOS -- Apple Silicon only.
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/matjam/faultline/internal/version.Version={{ .Version }}
+      - -X github.com/matjam/faultline/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/matjam/faultline/internal/version.BuildTime={{ .Date }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+      - AGENTS.md
+      - config.example.toml
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+# release-please writes the changelog into the GitHub release body.
+# Disable goreleaser's own changelog rendering so we don't double-publish.
+changelog:
+  disable: true
+
+release:
+  draft: false
+  # Append goreleaser's artifacts to whatever release-please already
+  # created for this tag, rather than creating a new release.
+  mode: append
+  # Mark anything tagged with -alpha / -beta / -rc as a prerelease so
+  # the self-update logic in cmd/faultline can skip it unless explicitly
+  # opted in.
+  prerelease: auto
