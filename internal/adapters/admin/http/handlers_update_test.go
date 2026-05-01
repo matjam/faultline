@@ -38,7 +38,7 @@ func (f *fakeUpdater) Apply(ctx context.Context) (*update.Result, error) {
 }
 
 func newUpdateAdminServer(t *testing.T, u UpdateInspector) *testServer {
-	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), nil, u)
+	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), nil, u, nil)
 }
 
 // newAdminTestServer-with-update needs a version that takes the
@@ -56,7 +56,7 @@ func init() {
 // here rather than in the shared test helper to avoid editing every
 // call site.
 func newAdminTestServerWithUpdate(t *testing.T, u UpdateInspector) *testServer {
-	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), nil, u)
+	return newAdminTestServer(t, nil, nil, NewToolBuffer(8), nil, u, nil)
 }
 
 func TestFragUpdate_NoUpdater(t *testing.T) {

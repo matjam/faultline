@@ -128,6 +128,16 @@ func (a *adminServer) AttachUpdater(u adminhttp.UpdateInspector) {
 	a.srv.SetUpdateInspector(u)
 }
 
+// AttachConfig wires the read+write configuration port. The store
+// itself is built in main.go once the config path and the
+// closeShutdown callback are in scope.
+func (a *adminServer) AttachConfig(c adminhttp.ConfigStore) {
+	if a == nil {
+		return
+	}
+	a.srv.SetConfigStore(c)
+}
+
 // ToolObserver returns the tool-call observer the composition root
 // must inject into the primary tools.Executor when admin is enabled.
 // Returns nil when admin is disabled, in which case Executor.observer

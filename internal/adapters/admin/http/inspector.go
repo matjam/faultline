@@ -61,6 +61,45 @@ type UpdateInspector interface {
 	Apply(ctx context.Context) (*update.Result, error)
 }
 
+// ConfigStore is the read+write port for the configuration page.
+// Implemented in cmd/faultline/admin.go where the file path and the
+// graceful-shutdown trigger are available; the admin server only
+// needs a small surface.
+//
+// All paths are relative to the operator's working directory; the
+// implementation handles atomic writes (temp + rename) and full
+// config.Load round-trips for validation.
+//
+// nil-allowed: when not wired, the Config card on the dashboard
+// renders a not-wired placeholder.
+type ConfigStore interface {
+	// Path returns the absolute path of the config file currently
+	// loaded. Surfaced in the UI so the operator knows what
+	// they're editing.
+	Path() string
+
+	// Read returns the raw TOML bytes from disk.
+	Read() ([]byte, error)
+
+	// Validate parses raw as TOML and runs the same defaults
+	// backfill / sanity passes that config.Load applies on real
+	// startup. Returns nil iff the bytes would load cleanly. Does
+	// NOT touch disk.
+	Validate(raw []byte) error
+
+	// Write atomically replaces the config file with raw after
+	// running Validate. Returns the validation error if the bytes
+	// don't parse; otherwise the write error.
+	Write(raw []byte) error
+
+	// Restart triggers graceful agent shutdown. The composition
+	// root's restart_mode in [update] dictates how the new
+	// process comes up — exit / self-exec / command. Idempotent:
+	// repeated calls are no-ops once the shutdown channel has
+	// been closed.
+	Restart()
+}
+
 // ToolBuffer is the in-memory ring buffer of recent tool-call events.
 // Implements tools.Observer so a single instance plugs straight into
 // the primary's Executor (and into each subagent's Executor too,

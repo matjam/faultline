@@ -1,0 +1,75 @@
+<div class="card bg-base-100 shadow-sm">
+  <div class="card-body">
+    <div class="flex items-center justify-between">
+      <h2 class="card-title">Configuration</h2>
+      {{if .HasConfig}}
+      <span class="text-sm opacity-70 font-mono">{{.Path}}</span>
+      {{else}}
+      <span class="badge badge-ghost">not wired</span>
+      {{end}}
+    </div>
+
+    {{if .FlashOK}}
+    <div class="alert alert-success py-2">
+      <span>{{.FlashOK}}</span>
+    </div>
+    {{end}}
+    {{if .FlashErr}}
+    <div class="alert alert-error py-2">
+      <pre class="text-xs whitespace-pre-wrap break-words">{{.FlashErr}}</pre>
+    </div>
+    {{end}}
+    {{if .ReadErr}}
+    <div class="alert alert-warning py-2">
+      <span>Could not read config file: {{.ReadErr}}</span>
+    </div>
+    {{end}}
+
+    {{if .HasConfig}}
+    <form id="config-form" hx-target="#config-card" hx-swap="innerHTML">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <textarea name="content"
+                spellcheck="false"
+                class="textarea textarea-bordered font-mono w-full min-h-[400px] mt-2"
+                {{if .ReadErr}}disabled{{end}}>{{.Raw}}</textarea>
+
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button type="submit"
+                class="btn btn-outline"
+                hx-post="/admin/config/validate"
+                {{if .ReadErr}}disabled{{end}}>
+          Validate
+        </button>
+        <button type="submit"
+                class="btn btn-primary"
+                hx-post="/admin/config/save"
+                hx-confirm="Save this configuration to disk? Existing file will be overwritten atomically."
+                {{if .ReadErr}}disabled{{end}}>
+          Save
+        </button>
+        {{if .Saved}}
+        <button type="button"
+                class="btn btn-warning ml-auto"
+                hx-post="/admin/config/restart"
+                hx-confirm="Restart the agent now? It will save state and then exit; the supervisor (or [update] restart_mode) will bring the new process up.">
+          Restart agent now
+        </button>
+        {{end}}
+      </div>
+    </form>
+
+    <div class="text-xs opacity-60 mt-3">
+      <strong>Note:</strong> most config values are read once at startup
+      (sandbox image, embeddings model, skills root, etc.). Save here
+      writes to disk; the agent must restart for changes to take
+      effect. Sampler parameters (temperature, top-p, etc.) likewise
+      take effect on the next process start.
+    </div>
+    {{else}}
+    <p class="opacity-70 text-sm">
+      The configuration store is not wired into the admin server.
+      Check <code>cmd/faultline/admin.go</code>.
+    </p>
+    {{end}}
+  </div>
+</div>
