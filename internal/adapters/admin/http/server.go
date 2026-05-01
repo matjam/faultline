@@ -64,6 +64,10 @@ type Deps struct {
 	// instance is wired into the primary's tools.Executor as the
 	// Observer, so the admin UI sees every dispatch. nil-allowed.
 	Tools *ToolBuffer
+
+	// Skills is the read+write port for the Skills page.
+	// nil-allowed (skills feature off, or stage 5 not yet wired).
+	Skills SkillsAdmin
 }
 
 // Server is the HTTP admin UI server. Construct with New, run with
@@ -100,6 +104,7 @@ var fragmentTemplates = []string{
 	"frag_status.html",
 	"frag_tools.html",
 	"frag_subagents.html",
+	"frag_skills.html",
 }
 
 // New parses templates and prepares the static-file sub-FS. Returns
@@ -219,6 +224,14 @@ func (s *Server) SetInspectors(agent AgentInspector, subs SubagentInspector) {
 	s.deps.Subagents = subs
 }
 
+// SetSkillsAdmin wires the Skills toggle port. Separate from
+// SetInspectors because the skills store is constructed before the
+// agent (no ordering dependency on the tool buffer), but kept on
+// its own setter for clarity.
+func (s *Server) SetSkillsAdmin(sk SkillsAdmin) {
+	s.deps.Skills = sk
+}
+
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
 		if s.srv == nil {
@@ -252,6 +265,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/fragments/status", s.requireAuth(s.handleFragStatus))
 	mux.HandleFunc("GET /admin/fragments/tools", s.requireAuth(s.handleFragTools))
 	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
+	mux.HandleFunc("GET /admin/fragments/skills", s.requireAuth(s.handleFragSkills))
+
+	// Skills toggle action. Re-renders the skills fragment so
+	// HTMX can hx-swap the updated card without a full page load.
+	mux.HandleFunc("POST /admin/skills/toggle", s.requireAuth(s.handleSkillsToggle))
 
 	// Anything not under /admin gets 404. We intentionally don't
 	// take over /; the agent doesn't expose anything else on this

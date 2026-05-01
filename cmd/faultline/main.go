@@ -263,6 +263,21 @@ func main() {
 		}
 		logger.Info("skills enabled", "dir", skillStore.Root())
 
+		// Load the operator-controlled enable/disable state file
+		// (admin UI's Skills page persists toggles here). Missing
+		// file is fine: it means "no skills disabled". Parse
+		// errors are loud but not fatal — the agent runs without
+		// the toggle layer in that case.
+		if cfg.Admin.SkillsFile != "" {
+			if err := skillStore.LoadDisabledFromFile(cfg.Admin.SkillsFile); err != nil {
+				logger.Error("skills: failed to load disabled-state file",
+					"path", cfg.Admin.SkillsFile, "error", err)
+			} else {
+				logger.Info("skills: disabled-state file loaded",
+					"path", cfg.Admin.SkillsFile)
+			}
+		}
+
 		// Wipe the per-call /work scratch root from the previous
 		// session so stale work_ids issued before a restart can't
 		// resolve. The Sandbox is already constructed at this point
@@ -390,6 +405,13 @@ func main() {
 			subInspector = subMgr
 		}
 		adminSrv.AttachInspectors(a, subInspector)
+		// Skills admin: wired separately because the skills
+		// store has no dependency on the agent or subagent
+		// manager. nil-safe inside SetSkillsAdmin if skills
+		// support is off entirely.
+		if skillStore != nil {
+			adminSrv.AttachSkills(skillStore)
+		}
 		adminSrv.Start(ctx)
 	}
 

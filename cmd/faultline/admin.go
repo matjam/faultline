@@ -107,6 +107,16 @@ func (a *adminServer) AttachInspectors(ag adminhttp.AgentInspector, sub adminhtt
 	a.srv.SetInspectors(ag, sub)
 }
 
+// AttachSkills wires the read+write Skills toggle port. Nil-safe on
+// the receiver; pass a nil sk to leave the Skills section of the
+// dashboard rendering its disabled-feature placeholder.
+func (a *adminServer) AttachSkills(sk adminhttp.SkillsAdmin) {
+	if a == nil {
+		return
+	}
+	a.srv.SetSkillsAdmin(sk)
+}
+
 // ToolObserver returns the tool-call observer the composition root
 // must inject into the primary tools.Executor when admin is enabled.
 // Returns nil when admin is disabled, in which case Executor.observer

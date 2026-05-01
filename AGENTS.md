@@ -308,6 +308,7 @@ Shared LLM-shaped value types. The OpenAI chat-completions wire shape is treated
 
 `fs.Store` is the filesystem-backed Skills adapter; satisfies the agent's `Skills` port plus extra methods used by the tools layer (`Get`, `Read`, `Resources`).
 
+- Operator-controlled enable/disable via `skills.toml` (path from `cfg.Admin.SkillsFile`). The admin UI's Skills card writes the file on every toggle; the file lists disabled skill names under a `disabled = []` array. `LoadDisabledFromFile` populates the in-memory disabled set; `List` and `Get` filter disabled skills out so the agent never sees them. `ListAll` (admin-only) returns the unfiltered catalog with a per-row `Disabled` flag.
 - Discovery walks `<root>/<name>/SKILL.md` at depth 2; non-skill subdirectories (no SKILL.md) and dotfile dirs (`.git`, etc.) are ignored.
 - Frontmatter parser uses `gopkg.in/yaml.v3` with a one-shot lenient retry that quotes unquoted-colon values (the spec's most common authoring mistake). Strict parse fails with no retry success surface as warnings; the skill is dropped.
 - Lenient validation: name mismatch with directory → use directory name (with diagnostic); over-length name/description/compatibility → diagnostic, still loaded; missing description → hard skip.
