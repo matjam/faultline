@@ -1,0 +1,160 @@
+# Faultline example configuration.
+#
+# Copy this file to config.toml (or another path passed via -config) and edit
+# for your deployment. All sections are optional; missing fields fall back to
+# the defaults documented inline below.
+#
+# Run as:    ./faultline -config /path/to/config.toml
+
+# ---------------------------------------------------------------------------
+# [api] — LLM backend connection.
+#
+# Faultline targets any OpenAI-compatible /v1/chat/completions endpoint.
+# Tested with KoboldCpp, llama.cpp's openai bridge, vLLM, and real OpenAI.
+# ---------------------------------------------------------------------------
+[api]
+# Base URL including the version prefix. Faultline appends /chat/completions.
+url = "http://localhost:5001/v1"
+
+# Bearer token. Leave empty for backends that don't require auth.
+key = ""
+
+# Model identifier. Sent in the request body; backends that serve a single
+# model usually accept any string.
+model = "qwen"
+
+# Auto-detect KoboldCpp-specific endpoints (real tokenizer, generation abort,
+# perf metrics). Safe to leave true on non-KoboldCpp backends — detection
+# fails silently and the agent falls back to a heuristic token estimator.
+kobold_extras = true
+
+# ---------------------------------------------------------------------------
+# [agent] — agent loop, sampler params, persistence.
+# ---------------------------------------------------------------------------
+[agent]
+# Directory for the agent's mutable memory store (markdown files, prompts,
+# trash). Created if missing.
+memory_dir = "./memory"
+
+# Hard ceiling for context size. Agent forces compaction at 95% of this.
+max_tokens = 262144
+
+# Compaction threshold. When the conversation exceeds this many tokens, the
+# agent is asked to save state and produce a summary; context is then rebuilt
+# from system prompt + recent memories + that summary.
+compaction_threshold = 150000
+
+# Maximum tokens per response.
+max_response_tokens = 4096
+
+# Path to a JSON file holding the live conversation log. Atomic save before
+# every LLM call; restored on startup so the agent resumes mid-conversation
+# across restarts. The system message is always rebuilt from current prompts
+# and memories on load. Empty string disables persistence.
+state_file = "./state.json"
+
+# Upper bound enforced by the `sleep` tool. The agent can request shorter
+# sleeps; longer ones are clamped to this value. Operator messages and
+# forced shutdown still interrupt mid-sleep regardless of this setting.
+max_sleep = "15m"
+
+# --- Sampler parameters ----------------------------------------------------
+# OpenAI-spec fields (sent on every request):
+temperature       = 0.8
+top_p             = 0.0   # 0 = unset; server uses its default
+presence_penalty  = 0.0
+frequency_penalty = 0.0
+seed              = 0     # 0 = unset; random seed each call
+
+# Vendor-extension fields. Not in the OpenAI spec but accepted as additional
+# JSON keys by KoboldCpp / llama.cpp / vLLM. Unknown fields are silently
+# ignored by servers that don't recognize them, so it's safe to set these
+# regardless of backend. 0 = unset.
+top_k              = 0
+min_p              = 0.0
+repetition_penalty = 0.0
+
+# ---------------------------------------------------------------------------
+# [telegram] — optional collaborator messaging.
+#
+# When both fields are set, the agent advertises the send_message tool and
+# accepts incoming messages from the configured chat ID. Leave both empty to
+# disable; the agent runs without a collaborator channel.
+# ---------------------------------------------------------------------------
+[telegram]
+token   = ""
+chat_id = 0
+
+# ---------------------------------------------------------------------------
+# [log] — logging.
+# ---------------------------------------------------------------------------
+[log]
+# Console log level: debug | info | warn | error. The on-disk log always
+# captures debug regardless of this setting.
+level = "info"
+
+# Directory for daily-rotated log files. Created if missing. Three streams:
+#   <date>.log         — main slog stream (debug-level, everything)
+#   chat-<date>.log    — human-readable LLM transcript
+#   sandbox-<date>.log — sandbox execution log (when sandbox is enabled)
+dir = "./logs"
+
+# ---------------------------------------------------------------------------
+# [sandbox] — Docker-backed Python execution.
+#
+# When enabled, the agent gets sandbox_* tools for writing/executing Python
+# scripts in ephemeral Docker containers (one container per operation).
+# Requires Docker in PATH.
+# ---------------------------------------------------------------------------
+[sandbox]
+enabled = false
+
+# Image to run scripts in. The default is uv-on-Python-3.12 from astral.sh,
+# which is fast at installing packages.
+image = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+
+# Sandbox working directory on the host. Mapped into the container as the
+# script's CWD. Three subdirs are auto-created: scripts/, input/, output/.
+dir = "./sandbox"
+
+# Per-operation timeout. Includes container start, script execution, and
+# package install/upgrade/remove operations.
+timeout = "5m"
+
+# Whether containers can reach the network. Off by default for safety.
+network = false
+
+# Memory limit passed to docker --memory.
+memory_limit = "512m"
+
+# ---------------------------------------------------------------------------
+# [email] — optional IMAP email reading.
+#
+# When all four fields are set, the agent advertises the email_fetch tool.
+# Connections are short-lived (one per fetch). Leave empty to disable.
+# ---------------------------------------------------------------------------
+[email]
+host     = ""
+port     = 993
+user     = ""
+password = ""
+
+# ---------------------------------------------------------------------------
+# [limits] — content-size caps for LLM-facing surfaces.
+#
+# Each limit applies to a different surface; when content is clipped, a
+# retrieval hint is appended so the agent knows which tool to call to read
+# the rest. Zero or negative values disable the cap for that surface.
+# ---------------------------------------------------------------------------
+[limits]
+# Per-entry cap on each "Recent Memories" excerpt in the system prompt.
+# Five entries are surfaced per turn.
+recent_memory_chars = 8000
+
+# Per-result cap for memory_search. Five results returned per query.
+memory_search_result_chars = 6000
+
+# Combined stdout+stderr cap for sandbox_execute and sandbox_shell. Larger
+# output should be written to /output/ in the script and read back with
+# sandbox_read.
+sandbox_output_chars = 64000

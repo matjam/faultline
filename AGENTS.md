@@ -264,9 +264,55 @@ The OpenAI-compatible chat completions client is hand-rolled in `internal/adapte
 - **Docker**: required for the sandbox feature. Must be in PATH.
 - **Network access**: required for the LLM API, web fetching, Telegram, IMAP.
 
-## Notes for Contributors
+## Configuration
 
-- Tests exist for `config`, `log`, `prompts`, `llm`, `bm25`, `openai` (chatlog), `kobold`, `memory/fs`, `operator/telegram`, `state/jsonfile`, and `tools` (HTML conversion). The `agent` package has no tests yet -- adding test seams is straightforward thanks to the ports.
-- The HTML-to-markdown converter in `internal/tools/executor.go` is substantial (~400 lines) and handles most common HTML elements. Not a third-party library.
-- The `webCache` runs a background goroutine for eviction; it is stopped via `Close()` when the `tools.Executor` is closed.
-- The default API URL in `config.Default()` points to a local network address -- change for your setup.
+A heavily commented example config lives at `config.example.toml` in the
+repository root. Copy it to your deployment as `config.toml` and edit. The
+embedded `config.Default()` returns the same values; `config.Load()`
+overlays anything set in the TOML file on top.
+
+## Contributing
+
+### Commit messages: Conventional Commits
+
+Faultline uses [Conventional Commits](https://www.conventionalcommits.org/)
+because release-please derives version bumps and changelog entries from
+the commit log on `main`.
+
+The convention is `type(scope)?: short subject`. Common types:
+
+| Type | Effect on version | Used for |
+|------|-------------------|----------|
+| `feat:` | Minor bump (1.2.0 -> 1.3.0) | New user-facing feature |
+| `fix:` | Patch bump (1.2.0 -> 1.2.1) | Bug fix |
+| `feat!:` or footer `BREAKING CHANGE:` | Major bump (1.2.0 -> 2.0.0) | Backwards-incompatible change |
+| `docs:` | No bump | Documentation only |
+| `refactor:` | No bump | Code restructuring with no behavior change |
+| `test:` | No bump | Test-only changes |
+| `chore:` | No bump | Build, deps, repo housekeeping |
+| `ci:` | No bump | CI/release workflow changes |
+
+The simplest discipline for keeping `main`'s commit log clean:
+
+1. Open a PR with whatever messy commits you like during development.
+2. Set the PR title to a single conventional-commit subject (e.g.
+   `feat: add memory_grep -B/-A context flags`).
+3. Squash-merge. GitHub uses the PR title as the squashed commit subject,
+   so `main` ends up with one tidy conventional commit per PR.
+
+### Tests
+
+Tests exist for `config`, `log`, `prompts`, `llm`, `bm25`, `openai`
+(chatlog), `kobold`, `memory/fs`, `operator/telegram`, `state/jsonfile`,
+and `tools` (HTML conversion + path validation). The `agent` package has
+no tests yet -- adding test seams is straightforward thanks to the ports.
+
+### Other notes
+
+- The HTML-to-markdown converter in `internal/tools/executor.go` is
+  substantial (~400 lines) and handles most common HTML elements. Not a
+  third-party library.
+- The `webCache` runs a background goroutine for eviction; it is stopped
+  via `Close()` when the `tools.Executor` is closed.
+- The default API URL in `config.Default()` points to a local network
+  address -- change it for your setup, or pass a populated `config.toml`.
