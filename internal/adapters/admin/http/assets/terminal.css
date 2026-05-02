@@ -14,11 +14,17 @@
  * progress bars) automatically inherit the right contrast pair.
  */
 
+/* font-display: optional — on a cached font (which we always are
+ * after the first page load thanks to the static handler's
+ * immutable cache directive) the browser uses the real font from
+ * the very first paint with no FOUT. On a cold cache the fallback
+ * is used for the page lifetime, but the fonts are vendored on the
+ * same origin so cold-cache renders are the exception. */
 @font-face {
   font-family: 'VT323';
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: optional;
   src: url('/admin/static/fonts/vt323.woff2') format('woff2');
 }
 
@@ -26,7 +32,7 @@
   font-family: 'Share Tech Mono';
   font-style: normal;
   font-weight: 400;
-  font-display: swap;
+  font-display: optional;
   src: url('/admin/static/fonts/sharetechmono.woff2') format('woff2');
 }
 
