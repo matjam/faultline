@@ -1,39 +1,100 @@
 {{define "layout"}}<!doctype html>
-<html lang="en" data-theme="dim">
+<html lang="en" data-theme="matrix">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{{.Title}} — Faultline admin</title>
+  <title>{{.Title}} :: faultline</title>
+  <link rel="preload" href="/admin/static/fonts/vt323.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/admin/static/fonts/sharetechmono.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/admin/static/daisyui.css">
   <link rel="stylesheet" href="/admin/static/daisyui-themes.css">
+  <link rel="stylesheet" href="/admin/static/terminal.css">
   <script src="/admin/static/tailwind.js"></script>
-  <script src="/admin/static/htmx.min.js" defer></script>
+  <script src="/admin/static/htmx.min.js"></script>
   <link rel="icon" href="data:,">
 </head>
-<body class="bg-base-200 min-h-screen">
+<body class="bg-base-200 min-h-screen" hx-boost="true">
   {{if .Authenticated}}
-    {{template "navbar" .}}
-  {{end}}
-  <main class="container mx-auto p-4 max-w-6xl">
+    <div class="drawer lg:drawer-open">
+      <input id="faultline-drawer" type="checkbox" class="drawer-toggle">
+
+      <div class="drawer-content flex flex-col min-h-screen">
+        {{template "navbar" .}}
+        <main class="flex-1 p-4 md:p-6">
+          {{template "content" .}}
+        </main>
+        <footer class="text-xs opacity-60 px-4 py-3 border-t border-base-300">
+          faultline {{.Version}} &middot; signed in as
+          <span class="font-mono">{{.Username}}</span> &middot;
+          <span class="terminal-prompt">connection established</span>
+        </footer>
+      </div>
+
+      <div class="drawer-side z-20">
+        <label for="faultline-drawer" aria-label="close sidebar"
+               class="drawer-overlay"></label>
+        <aside class="faultline-sidebar w-64">
+          <div class="px-4 mb-4">
+            <a href="/admin" class="faultline-brand">FAULTLINE</a>
+            <div class="text-xs opacity-60 mt-1">{{.Version}}</div>
+          </div>
+          <ul class="menu w-full px-0">
+            <li class="menu-title px-4">// navigation</li>
+            {{range .Nav}}
+            <li>
+              <a href="{{.Href}}" class="{{if .Active}}active{{end}}">
+                <span class="nav-marker">{{if .Active}}▶{{else}}·{{end}}</span>
+                <span>{{.Label}}</span>
+              </a>
+            </li>
+            {{end}}
+          </ul>
+
+          <div class="mt-auto px-4 py-3 border-t border-base-300">
+            <form method="POST" action="/admin/logout">
+              <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+              <button class="btn btn-sm btn-ghost w-full justify-start"
+                      type="submit">
+                <span class="opacity-70">[</span>
+                <span>logout</span>
+                <span class="opacity-70">]</span>
+              </button>
+            </form>
+          </div>
+        </aside>
+      </div>
+    </div>
+  {{else}}
     {{template "content" .}}
-  </main>
+  {{end}}
 </body>
 </html>
 {{end}}
 
 {{define "navbar"}}
-<div class="navbar bg-base-100 shadow-sm">
-  <div class="container mx-auto max-w-6xl">
-    <div class="flex-1">
-      <a class="btn btn-ghost text-xl" href="/admin">Faultline</a>
-    </div>
-    <div class="flex-none gap-2">
-      <span class="text-sm opacity-70">signed in as <span class="font-mono">{{.Username}}</span></span>
-      <form method="POST" action="/admin/logout" class="inline">
-        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-        <button class="btn btn-sm btn-ghost" type="submit">Sign out</button>
-      </form>
-    </div>
+<div class="faultline-navbar navbar px-4 py-2">
+  <div class="flex-none lg:hidden">
+    <label for="faultline-drawer" aria-label="open sidebar"
+           class="btn btn-square btn-ghost">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+           stroke="currentColor" class="inline-block h-6 w-6 stroke-current">
+        <path stroke-linecap="square" stroke-linejoin="miter"
+              stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+      </svg>
+    </label>
+  </div>
+  <div class="flex-1">
+    <span class="terminal-section-title m-0 border-l-0 pl-0">
+      // {{.SectionLabel}}
+    </span>
+  </div>
+  <div class="flex-none gap-3 text-xs opacity-70">
+    <span class="hidden md:inline">
+      uptime <span class="font-mono">{{.Uptime}}</span>
+    </span>
+    <span class="hidden md:inline">
+      <span class="badge badge-sm badge-success glow">online</span>
+    </span>
   </div>
 </div>
 {{end}}

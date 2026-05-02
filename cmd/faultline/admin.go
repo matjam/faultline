@@ -13,6 +13,7 @@ import (
 	adminhttp "github.com/matjam/faultline/internal/adapters/admin/http"
 	"github.com/matjam/faultline/internal/adapters/auth/users"
 	"github.com/matjam/faultline/internal/config"
+	flog "github.com/matjam/faultline/internal/log"
 	"github.com/matjam/faultline/internal/tools"
 )
 
@@ -27,6 +28,12 @@ type adminServer struct {
 	// is also handed to the primary tools.Executor as the
 	// Observer. Same instance, two consumers.
 	toolBuf *adminhttp.ToolBuffer
+
+	// requestLog is the dedicated daily-rotated file backing the
+	// per-request access log. Closed on shutdown alongside the
+	// session store. nil when no LogDir is configured (request log
+	// silently falls back to the main slog Logger).
+	requestLog *flog.Daily
 
 	logger *slog.Logger
 	wg     sync.WaitGroup
@@ -69,16 +76,40 @@ func buildAdmin(ctx context.Context, cfg *config.Config, startedAt time.Time, lo
 	sessions := users.NewSessionStore(ctx, cfg.Admin.SessionTTL.Duration())
 	toolBuf := adminhttp.NewToolBuffer(0) // 0 = use default (500)
 
+	// Dedicated request-log sink. The dashboard polls a handful of
+	// fragments every 1-2 seconds; routing the access log to its
+	// own file keeps the main log stream readable. Failure here is
+	// non-fatal: we log a warning and let the admin server fall
+	// back to the shared logger.
+	var requestLog *flog.Daily
+	var requestLogger *slog.Logger
+	if cfg.Log.Dir != "" {
+		rl, err := flog.NewDailyPrefixed(cfg.Log.Dir, "admin-http-")
+		if err != nil {
+			logger.Warn("admin: could not open dedicated request log; falling back to main logger",
+				"dir", cfg.Log.Dir, "error", err)
+		} else {
+			requestLog = rl
+			requestLogger = slog.New(slog.NewTextHandler(rl,
+				&slog.HandlerOptions{Level: slog.LevelDebug}))
+		}
+	}
+
 	srv, err := adminhttp.New(adminhttp.Deps{
-		Bind:      cfg.Admin.Bind,
-		Users:     store,
-		Sessions:  sessions,
-		StartedAt: startedAt,
-		Logger:    logger,
-		Tools:     toolBuf,
+		Bind:          cfg.Admin.Bind,
+		Users:         store,
+		Sessions:      sessions,
+		StartedAt:     startedAt,
+		Logger:        logger,
+		RequestLogger: requestLogger,
+		LogDir:        cfg.Log.Dir,
+		Tools:         toolBuf,
 	})
 	if err != nil {
 		sessions.Close()
+		if requestLog != nil {
+			_ = requestLog.Close()
+		}
 		return nil, fmt.Errorf("admin server: %w", err)
 	}
 
@@ -88,10 +119,11 @@ func buildAdmin(ctx context.Context, cfg *config.Config, startedAt time.Time, lo
 		"session_ttl", cfg.Admin.SessionTTL.Duration())
 
 	return &adminServer{
-		srv:      srv,
-		sessions: sessions,
-		toolBuf:  toolBuf,
-		logger:   logger,
+		srv:        srv,
+		sessions:   sessions,
+		toolBuf:    toolBuf,
+		requestLog: requestLog,
+		logger:     logger,
 	}, nil
 }
 
@@ -178,12 +210,17 @@ func (a *adminServer) Wait() {
 	a.wg.Wait()
 }
 
-// Close releases the session store. Shutdown of the HTTP server is
-// driven by the parent context; calling Close after Wait is the
-// clean order.
+// Close releases the session store and the dedicated request-log
+// file. Shutdown of the HTTP server is driven by the parent context;
+// calling Close after Wait is the clean order.
 func (a *adminServer) Close() {
 	if a == nil {
 		return
 	}
 	a.sessions.Close()
+	if a.requestLog != nil {
+		if err := a.requestLog.Close(); err != nil {
+			a.logger.Warn("admin: closing request log", "error", err)
+		}
+	}
 }

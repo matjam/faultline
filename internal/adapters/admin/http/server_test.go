@@ -222,7 +222,7 @@ func TestServer_FullLoginAndDashboard(t *testing.T) {
 	if !strings.Contains(string(body), "signed in as") {
 		t.Fatalf("dashboard body missing navbar signed-in text: %s", body)
 	}
-	if !strings.Contains(string(body), "Faultline version") {
+	if !strings.Contains(string(body), "faultline version") {
 		t.Fatalf("dashboard body missing version stat header: %s", body)
 	}
 	if !strings.Contains(string(body), `id="agent-status"`) {

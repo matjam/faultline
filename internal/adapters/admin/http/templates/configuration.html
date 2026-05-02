@@ -1,0 +1,235 @@
+{{define "content"}}
+<div class="flex flex-col gap-4">
+  <div class="flex items-baseline justify-between flex-wrap gap-2">
+    <h1 class="terminal-section-title">// configuration</h1>
+    {{if .Path}}
+    <span class="text-xs font-mono opacity-60">{{.Path}}</span>
+    {{end}}
+  </div>
+
+  {{if not .HasConfig}}
+  <div class="alert alert-warning">
+    <span>The configuration store is not wired into the admin server.
+      Check <code>cmd/faultline/admin.go</code>.</span>
+  </div>
+  {{else if .ReadErr}}
+  <div class="alert alert-error">
+    <span>Could not read config file: {{.ReadErr}}</span>
+  </div>
+  {{else}}
+
+  {{if .FlashOK}}
+  <div class="alert alert-success">
+    <span>{{.FlashOK}}</span>
+  </div>
+  {{end}}
+  {{if .FlashErr}}
+  <div class="alert alert-error">
+    <pre class="text-xs whitespace-pre-wrap break-words">{{.FlashErr}}</pre>
+  </div>
+  {{end}}
+  {{if .Warnings}}
+  <div class="alert alert-warning">
+    <div class="flex flex-col gap-1">
+      <span class="font-semibold">Some fields could not be parsed:</span>
+      <ul class="text-xs opacity-90">
+        {{range .Warnings}}<li>· {{.}}</li>{{end}}
+      </ul>
+    </div>
+  </div>
+  {{end}}
+
+  <div class="text-xs opacity-60">
+    Form rendered automatically from <code>config.Config</code> via reflection.
+    Secrets (API keys, tokens, passwords) are masked &mdash; leave blank to
+    keep the existing value. Saved values take effect after a process
+    restart.
+  </div>
+
+  <form method="POST" action="/admin/configuration/save"
+        class="flex flex-col gap-5">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+    <div class="matrix-tabs" id="cfg-tabs">
+      <div class="matrix-tab-strip" role="tablist">
+        {{range .Form.Sections}}
+        <button type="button" class="matrix-tab" role="tab"
+                data-cfg-tab="{{.Path}}">[{{.Path}}]</button>
+        {{end}}
+      </div>
+      <div class="matrix-tab-panels">
+        {{range .Form.Sections}}
+        <section class="matrix-tab-panel" data-cfg-panel="{{.Path}}">
+          <div class="text-xs opacity-60 mb-3">{{.Title}}</div>
+
+          {{range .Fields}}
+            {{template "cfg_field" .}}
+          {{end}}
+
+          {{if .ProfileRows}}
+          <div class="mt-3">
+            <div class="text-xs opacity-70 mb-2">// {{.Path}} entries</div>
+            {{range .ProfileRows}}
+            <div class="border border-base-300 p-3 mb-2">
+              <div class="text-xs opacity-60 mb-2">[#{{.Index}}]</div>
+              {{range .Fields}}
+                {{template "cfg_field" .}}
+              {{end}}
+            </div>
+            {{end}}
+            <p class="text-xs opacity-60 mt-1">
+              Add or remove rows by editing the file directly &mdash; this UI
+              edits existing rows only.
+            </p>
+          </div>
+          {{end}}
+        </section>
+        {{end}}
+      </div>
+    </div>
+
+    <script>
+    (function () {
+      var root = document.getElementById("cfg-tabs");
+      if (!root) return;
+      var tabs = root.querySelectorAll(".matrix-tab");
+      var panels = root.querySelectorAll(".matrix-tab-panel");
+      // Persist the active tab across navigations within this
+      // browser session so a save → re-render keeps the operator
+      // on the section they were just editing.
+      var key = "faultline.cfgtab";
+      function activate(name) {
+        var matched = false;
+        tabs.forEach(function (t) {
+          var on = t.dataset.cfgTab === name;
+          t.classList.toggle("active", on);
+          if (on) matched = true;
+        });
+        panels.forEach(function (p) {
+          p.classList.toggle("active", p.dataset.cfgPanel === name);
+        });
+        if (matched) {
+          try { sessionStorage.setItem(key, name); } catch (e) {}
+        }
+      }
+      tabs.forEach(function (t) {
+        t.addEventListener("click", function () {
+          activate(t.dataset.cfgTab);
+        });
+      });
+      var saved = null;
+      try { saved = sessionStorage.getItem(key); } catch (e) {}
+      if (saved && root.querySelector('[data-cfg-tab="' + saved + '"]')) {
+        activate(saved);
+      } else if (tabs.length) {
+        activate(tabs[0].dataset.cfgTab);
+      }
+    })();
+    </script>
+
+    <div class="flex gap-3 sticky bottom-0 bg-base-200/95 p-3 border-t border-base-300">
+      <button type="submit" class="btn btn-primary"
+              onclick="return confirm('Save configuration to disk? Validation runs first; the file is replaced atomically.');">
+        ▶ save
+      </button>
+      {{if .Saved}}
+      <form method="POST" action="/admin/config/restart" class="ml-auto">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+        <button class="btn btn-warning" type="submit"
+                onclick="return confirm('Restart the agent now? It will save state and exit; the supervisor (or restart_mode) brings the new process up.');">
+          ▶ restart agent now
+        </button>
+      </form>
+      {{end}}
+    </div>
+  </form>
+
+  {{end}}
+</div>
+{{end}}
+
+{{/* Generic field renderer. Switches on .Kind. */}}
+{{define "cfg_field"}}
+{{if eq .Kind "bool"}}
+<label class="cursor-pointer flex items-center gap-3 mb-2 py-1">
+  <input type="hidden" name="{{.Path}}__present" value="1">
+  <input type="checkbox" name="{{.Path}}" value="true"
+         class="toggle toggle-success" {{if .BoolValue}}checked{{end}}>
+  <span class="text-sm font-mono">{{.Label}}</span>
+  {{if .Help}}<span class="text-xs opacity-50 ml-auto">{{.Help}}</span>{{end}}
+</label>
+{{else if eq .Kind "select"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}}</span>
+    {{if .Help}}<span class="text-xs opacity-50">{{.Help}}</span>{{end}}
+  </div>
+  <select name="{{.Path}}" class="select select-bordered select-sm w-full font-mono">
+    {{$cur := .StringValue}}
+    {{range .Options}}
+    <option value="{{.}}" {{if eq . $cur}}selected{{end}}>{{.}}</option>
+    {{end}}
+  </select>
+</label>
+{{else if eq .Kind "secret"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">
+      {{.Label}}
+      {{if .HasSecret}}<span class="text-xs opacity-60">(set)</span>{{end}}
+    </span>
+    <span class="text-xs opacity-50">{{if .Help}}{{.Help}}{{else}}leave blank to keep existing{{end}}</span>
+  </div>
+  <input type="password" name="{{.Path}}" value=""
+         placeholder="{{if .HasSecret}}••••••••{{else}}(unset){{end}}"
+         autocomplete="new-password"
+         class="input input-bordered input-sm w-full font-mono">
+</label>
+{{else if eq .Kind "int"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}}</span>
+    {{if .Help}}<span class="text-xs opacity-50">{{.Help}}</span>{{end}}
+  </div>
+  <input type="number" step="1" name="{{.Path}}" value="{{.StringValue}}"
+         class="input input-bordered input-sm w-full font-mono">
+</label>
+{{else if eq .Kind "float"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}}</span>
+    {{if .Help}}<span class="text-xs opacity-50">{{.Help}}</span>{{end}}
+  </div>
+  <input type="number" step="any" name="{{.Path}}" value="{{.StringValue}}"
+         class="input input-bordered input-sm w-full font-mono">
+</label>
+{{else if eq .Kind "duration"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}} <span class="text-xs opacity-60">(duration)</span></span>
+    <span class="text-xs opacity-50">{{if .Help}}{{.Help}}{{else}}format: 5m, 1h30m, 90s{{end}}</span>
+  </div>
+  <input type="text" name="{{.Path}}" value="{{.StringValue}}"
+         class="input input-bordered input-sm w-full font-mono">
+</label>
+{{else if eq .Kind "readonly"}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}} <span class="text-xs opacity-60">(read-only)</span></span>
+    {{if .Help}}<span class="text-xs opacity-50">{{.Help}}</span>{{end}}
+  </div>
+  <input type="text" value="{{.StringValue}}" disabled
+         class="input input-bordered input-sm w-full font-mono opacity-70">
+</label>
+{{else}}
+{{/* default: string */}}
+<label class="form-control mb-2">
+  <div class="flex items-baseline justify-between">
+    <span class="text-sm font-mono">{{.Label}}</span>
+    {{if .Help}}<span class="text-xs opacity-50">{{.Help}}</span>{{end}}
+  </div>
+  <input type="text" name="{{.Path}}" value="{{.StringValue}}"
+         class="input input-bordered input-sm w-full font-mono">
+</label>
+{{end}}
+{{end}}

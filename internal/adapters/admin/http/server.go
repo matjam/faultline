@@ -1,19 +1,18 @@
 // Package adminhttp implements the embedded HTTP admin UI driving
-// adapter for Faultline. It listens on a loopback address (no TLS
-// in v1; reverse-proxy TLS termination is the documented path) and
-// serves an HTMX + DaisyUI front-end backed by html/template
-// rendering.
+// adapter for Faultline. It listens on a loopback address (no TLS;
+// reverse-proxy TLS termination is the documented path) and serves
+// an HTMX + DaisyUI front-end backed by html/template rendering.
 //
-// In stage 2 this package only carries the skeleton: login, logout,
-// session and CSRF middleware, embedded asset serving, and a stub
-// dashboard. Live status, config editing, skill toggling, and
-// statistics land in subsequent stages.
+// The UI is a multi-section dashboard with a persistent sidebar +
+// navbar shell. Each section is its own page (full-reload navigation)
+// with HTMX fragments for live data inside the page. The Matrix
+// terminal theme is custom DaisyUI v5 plus the local CSS in
+// assets/terminal.css.
 //
 // Auth is delegated to internal/adapters/auth/users (argon2id
-// password hashing, in-memory sessions). The admin server has no
-// view of the agent's domain ports yet — those will be added as
-// AgentInspector / SubagentInspector / ToolObserver / ConfigStore
-// in stage 3+.
+// password hashing, in-memory sessions). The admin server depends on
+// the agent's domain ports through the consumer-defined inspector
+// interfaces in inspector.go.
 package adminhttp
 
 import (
@@ -38,90 +37,85 @@ type Deps struct {
 	// Users is the loaded user store.
 	Users *users.Store
 
-	// Sessions is the in-memory session store. The Server does not
-	// own its lifecycle — the composition root does, so the same
-	// store survives across server restarts (e.g. on config edit
-	// triggering a graceful restart in a later stage).
+	// Sessions is the in-memory session store.
 	Sessions *users.SessionStore
 
-	// StartedAt is the wall-clock time the agent process started;
-	// surfaced on the dashboard.
+	// StartedAt is the wall-clock time the agent process started.
 	StartedAt time.Time
 
-	// Logger is the shared slog logger.
+	// Logger is the shared slog logger. Used for everything except
+	// per-request access logs.
 	Logger *slog.Logger
 
-	// Agent is the live primary agent inspector. nil-allowed: when
-	// not wired the dashboard renders empty placeholders. Stage 3
-	// onward expects this to be set.
+	// RequestLogger is the dedicated slog logger for the per-request
+	// access log. The dashboard polls a handful of fragments every
+	// 1-2 seconds, so this stream is spammy by design — split out
+	// of the main log so the operator can ignore it without losing
+	// visibility into agent / config / shutdown events. nil-allowed:
+	// when not wired, request logs fall back to Logger.
+	RequestLogger *slog.Logger
+
+	// LogDir is the directory holding the daily-rotated agent log
+	// files. The Logs section reads <LogDir>/YYYY-MM-DD.log to tail
+	// today's output. Empty disables the logs page (renders a
+	// not-configured placeholder).
+	LogDir string
+
+	// Agent is the live primary agent inspector.
 	Agent AgentInspector
 
-	// Subagents is the live subagent.Manager inspector. nil-allowed
-	// when [subagent] is disabled.
+	// Subagents is the live subagent.Manager inspector.
 	Subagents SubagentInspector
 
-	// Tools is the in-memory tool-call ring buffer. The same
-	// instance is wired into the primary's tools.Executor as the
-	// Observer, so the admin UI sees every dispatch. nil-allowed.
+	// Tools is the in-memory tool-call ring buffer.
 	Tools *ToolBuffer
 
-	// Skills is the read+write port for the Skills page.
-	// nil-allowed (skills feature off, or stage 5 not yet wired).
+	// Skills is the read+write port for the Skills section.
 	Skills SkillsAdmin
 
 	// Update is the read+write port for the self-update pane.
-	// nil-allowed: when not set, the Update card renders a
-	// "updater not wired" placeholder.
 	Update UpdateInspector
 
-	// Config is the read+write port for the configuration editor
-	// page. nil-allowed; the Config card surfaces a not-wired
-	// placeholder otherwise.
+	// Config is the read+write port for the configuration editor.
 	Config ConfigStore
 }
 
-// Server is the HTTP admin UI server. Construct with New, run with
-// Run; Shutdown is idempotent.
+// Server is the HTTP admin UI server.
 type Server struct {
 	deps      Deps
-	templates map[string]*template.Template // contentName -> layout+content combined
-	fragments map[string]*template.Template // fragName -> standalone template
+	templates map[string]*template.Template
+	fragments map[string]*template.Template
 	staticSub fs.FS
 
 	srv      *http.Server
 	stopOnce sync.Once
 }
 
-// contentTemplates is the fixed set of content templates we ship.
-// Each entry combines layout.html with that content file at parse
-// time, producing a template whose root entry point is "layout".
-//
-// We pre-parse all combinations at startup rather than parsing per
-// request, but each entry is a separate *template.Template so the
-// {{define "content"}} blocks across content files don't collide
-// (which they would in a single ParseFS-parsed set, with the
-// last-parsed win).
+// contentTemplates is the fixed set of (layout + content) templates
+// we ship. Each is parsed once at startup; multiple ParseFS would
+// collapse the {{define "content"}} blocks across content files.
 var contentTemplates = []string{
 	"login.html",
 	"dashboard.html",
+	"configuration.html",
+	"subagents.html",
+	"skills.html",
+	"version.html",
+	"logs.html",
 }
 
 // fragmentTemplates are stand-alone HTMX-fragment templates rendered
-// without a surrounding layout. Each file defines a single named
-// template (matching the file's basename minus .html) which the
-// fragment handlers execute.
+// without a surrounding layout.
 var fragmentTemplates = []string{
 	"frag_status.html",
 	"frag_tools.html",
 	"frag_subagents.html",
 	"frag_skills.html",
 	"frag_update.html",
-	"frag_config.html",
+	"frag_logs.html",
 }
 
-// New parses templates and prepares the static-file sub-FS. Returns
-// an error if the embedded template set fails to parse — that's a
-// programmer error and should fail loudly.
+// New parses templates and prepares the static-file sub-FS.
 func New(deps Deps) (*Server, error) {
 	if deps.Bind == "" {
 		return nil, errors.New("adminhttp: empty bind address")
@@ -177,11 +171,7 @@ func New(deps Deps) (*Server, error) {
 }
 
 // Run binds the listener and serves until ctx is canceled or
-// Shutdown is called. Returns nil on graceful shutdown, or a non-nil
-// error for bind failures or other unrecoverable conditions.
-//
-// The server registers its handlers on a fresh ServeMux; nothing in
-// this package mutates DefaultServeMux.
+// Shutdown is called.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	s.routes(mux)
@@ -195,7 +185,6 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Shut the server down when the parent context fires.
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -213,50 +202,24 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
-// Shutdown gracefully stops the server. Idempotent; safe to call
-// after Run has already returned.
-func (s *Server) Shutdown() {
-	s.shutdown()
-}
+// Shutdown gracefully stops the server.
+func (s *Server) Shutdown() { s.shutdown() }
 
 // SetInspectors swaps in the live agent + subagent inspectors after
-// construction. Used by the composition root because the agent
-// constructor in turn depends on the tools.Executor (which we feed
-// the admin's ToolBuffer), so the order has to be:
-//
-//  1. build admin (owns the tool buffer)
-//  2. build tools.Executor with admin's tool buffer as Observer
-//  3. build agent on top of the executor
-//  4. attach inspectors back to admin
-//
-// Either argument may be nil; nil disables that section of the
-// dashboard rather than producing an error.
+// construction. Both nil-allowed.
 func (s *Server) SetInspectors(agent AgentInspector, subs SubagentInspector) {
 	s.deps.Agent = agent
 	s.deps.Subagents = subs
 }
 
-// SetSkillsAdmin wires the Skills toggle port. Separate from
-// SetInspectors because the skills store is constructed before the
-// agent (no ordering dependency on the tool buffer), but kept on
-// its own setter for clarity.
-func (s *Server) SetSkillsAdmin(sk SkillsAdmin) {
-	s.deps.Skills = sk
-}
+// SetSkillsAdmin wires the Skills toggle port.
+func (s *Server) SetSkillsAdmin(sk SkillsAdmin) { s.deps.Skills = sk }
 
-// SetUpdateInspector wires the self-update read+write port. The
-// updater is always constructed in main.go (it serves the
-// get_version tool even when self-update is disabled), so this is
-// usually called even when cfg.Update.Enabled is false; the pane
-// renders a "auto-update off" view in that case.
-func (s *Server) SetUpdateInspector(u UpdateInspector) {
-	s.deps.Update = u
-}
+// SetUpdateInspector wires the self-update read+write port.
+func (s *Server) SetUpdateInspector(u UpdateInspector) { s.deps.Update = u }
 
 // SetConfigStore wires the read+write configuration port.
-func (s *Server) SetConfigStore(c ConfigStore) {
-	s.deps.Config = c
-}
+func (s *Server) SetConfigStore(c ConfigStore) { s.deps.Config = c }
 
 func (s *Server) shutdown() {
 	s.stopOnce.Do(func() {
@@ -271,51 +234,50 @@ func (s *Server) shutdown() {
 	})
 }
 
-// routes wires every handler. Stage 2 surface area: static, login,
-// logout, dashboard, healthz.
+// routes wires every handler.
 func (s *Server) routes(mux *http.ServeMux) {
+	// Vendored static assets ship inside the binary, so they are
+	// effectively immutable for the lifetime of a deployment. Tag
+	// them with a far-future cache header so the browser doesn't
+	// revalidate fonts / CSS / JS on every navigation — without
+	// this, full-page navigations briefly redraw with fallback
+	// fonts before the WOFF2 cache hit settles.
 	staticHandler := http.StripPrefix("/admin/static/", http.FileServer(http.FS(s.staticSub)))
-
-	mux.Handle("GET /admin/static/", staticHandler)
+	mux.Handle("GET /admin/static/", cacheImmutable(staticHandler))
 
 	mux.HandleFunc("GET /admin/healthz", s.handleHealthz)
 	mux.HandleFunc("GET /admin/login", s.handleLoginGet)
 	mux.HandleFunc("POST /admin/login", s.handleLoginPost)
 	mux.HandleFunc("POST /admin/logout", s.requireAuth(s.handleLogout))
+
+	// Pages: each section in the sidebar is its own GET endpoint.
 	mux.HandleFunc("GET /admin/{$}", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("GET /admin", s.requireAuth(s.handleDashboard))
+	mux.HandleFunc("GET /admin/configuration", s.requireAuth(s.handleConfiguration))
+	mux.HandleFunc("GET /admin/subagents", s.requireAuth(s.handleSubagentsPage))
+	mux.HandleFunc("GET /admin/skills", s.requireAuth(s.handleSkillsPage))
+	mux.HandleFunc("GET /admin/version", s.requireAuth(s.handleVersionPage))
+	mux.HandleFunc("GET /admin/logs", s.requireAuth(s.handleLogsPage))
 
-	// Live HTMX fragments. Polled by the dashboard at low frequency
-	// (1–2s) so the operator sees fresh state without the cost of
-	// SSE plumbing. All require auth.
+	// Live HTMX fragments. All require auth.
 	mux.HandleFunc("GET /admin/fragments/status", s.requireAuth(s.handleFragStatus))
 	mux.HandleFunc("GET /admin/fragments/tools", s.requireAuth(s.handleFragTools))
 	mux.HandleFunc("GET /admin/fragments/subagents", s.requireAuth(s.handleFragSubagents))
 	mux.HandleFunc("GET /admin/fragments/skills", s.requireAuth(s.handleFragSkills))
 	mux.HandleFunc("GET /admin/fragments/update", s.requireAuth(s.handleFragUpdate))
-	mux.HandleFunc("GET /admin/fragments/config", s.requireAuth(s.handleFragConfig))
+	mux.HandleFunc("GET /admin/fragments/logs", s.requireAuth(s.handleFragLogs))
 
-	// Skills toggle action. Re-renders the skills fragment so
-	// HTMX can hx-swap the updated card without a full page load.
+	// Skills toggle action.
 	mux.HandleFunc("POST /admin/skills/toggle", s.requireAuth(s.handleSkillsToggle))
 
-	// Update actions. /apply triggers a destructive update and
-	// graceful shutdown; the response body is the new card with
-	// a flash explaining what happened, but the browser will
-	// likely lose the connection mid-shutdown — that's fine.
+	// Update apply action.
 	mux.HandleFunc("POST /admin/update/apply", s.requireAuth(s.handleUpdateApply))
 
-	// Config actions: validate, save, restart. Each re-renders
-	// the config fragment with a flash so the operator sees the
-	// outcome inline.
-	mux.HandleFunc("POST /admin/config/validate", s.requireAuth(s.handleConfigValidate))
-	mux.HandleFunc("POST /admin/config/save", s.requireAuth(s.handleConfigSave))
+	// Configuration save + restart.
+	mux.HandleFunc("POST /admin/configuration/save", s.requireAuth(s.handleConfigurationSave))
 	mux.HandleFunc("POST /admin/config/restart", s.requireAuth(s.handleConfigRestart))
 
-	// Anything not under /admin gets 404. We intentionally don't
-	// take over /; the agent doesn't expose anything else on this
-	// port, and forwarding "/" to "/admin" would trip up reverse
-	// proxies that expect the prefix to be explicit.
+	// Anything not under /admin gets 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
@@ -325,6 +287,23 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// cacheImmutable wraps a handler so static-asset responses carry the
+// "public, max-age=31536000, immutable" cache directive. The vendored
+// assets are baked into the binary and never change for the lifetime
+// of a deployment; revalidation on every page navigation is wasteful
+// and visibly noisy (fonts re-applying mid-paint produces a flicker).
+//
+// On a binary upgrade the operator restarts the agent; the asset
+// paths are unchanged but the contents may differ. That's acceptable
+// here — admin-UI assets aren't safety-critical and a forced reload
+// (Ctrl+Shift+R) clears the cache.
+func cacheImmutable(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // render executes the layout template for the named content. Each
@@ -339,8 +318,6 @@ func (s *Server) render(w http.ResponseWriter, contentName string, data any) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.ExecuteTemplate(w, "layout", data); err != nil {
-		// Headers are likely already flushed by the time Execute
-		// returns; logging is the only useful action.
 		s.deps.Logger.Error("render: execute", "template", contentName, "error", err)
 	}
 }

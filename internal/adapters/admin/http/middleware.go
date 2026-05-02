@@ -128,8 +128,15 @@ func safeNext(p string) string {
 }
 
 // requestLogger wraps the mux to emit one structured log line per
-// request. Static asset requests are demoted to debug to keep the
-// info stream readable.
+// request. Routed to deps.RequestLogger when wired so the access log
+// — which can be very spammy due to 1-2s fragment polling — lives in
+// its own daily-rotated file rather than drowning out the main log.
+// Falls back to deps.Logger when no dedicated request logger is set
+// (test harnesses, embedded scenarios).
+//
+// Static asset requests are demoted to debug regardless of which sink
+// is active, in case operators raise the request log to debug for
+// triage.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -137,10 +144,11 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
 
-		level := "info"
-		if r.URL.Path == "/admin/static/" || hasPrefix(r.URL.Path, "/admin/static/") {
-			level = "debug"
+		sink := s.deps.RequestLogger
+		if sink == nil {
+			sink = s.deps.Logger
 		}
+
 		args := []any{
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -149,10 +157,10 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 			"duration", dur,
 			"remote", r.RemoteAddr,
 		}
-		if level == "debug" {
-			s.deps.Logger.Debug("admin request", args...)
+		if r.URL.Path == "/admin/static/" || hasPrefix(r.URL.Path, "/admin/static/") {
+			sink.Debug("admin request", args...)
 		} else {
-			s.deps.Logger.Info("admin request", args...)
+			sink.Info("admin request", args...)
 		}
 	})
 }

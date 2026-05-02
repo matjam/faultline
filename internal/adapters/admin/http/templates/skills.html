@@ -1,0 +1,23 @@
+{{define "content"}}
+<div class="flex flex-col gap-4">
+  <h1 class="terminal-section-title">// skills catalog</h1>
+
+  <p class="text-sm opacity-70">
+    Operator-controlled enable/disable for every skill discovered under the
+    configured skills root. Disabled skills are filtered out of the agent's
+    catalog before tool dispatch.
+  </p>
+
+  <div id="skills-card"
+       hx-get="/admin/fragments/skills"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100">
+      <div class="card-body">
+        <div class="skeleton h-6 w-32 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
