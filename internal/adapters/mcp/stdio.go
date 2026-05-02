@@ -100,6 +100,21 @@ func (c *StdioClient) Restart(ctx context.Context, serverName string) (Discovere
 	return c.Discover(ctx, server.Name)
 }
 
+// RestartWithConfig replaces one server's live config, closes its current
+// session, then re-runs discovery with the fresh config.
+func (c *StdioClient) RestartWithConfig(ctx context.Context, server ServerConfig) (DiscoveredServer, error) {
+	if err := server.Validate(); err != nil {
+		return DiscoveredServer{}, err
+	}
+	if server.Transport != "stdio" {
+		return DiscoveredServer{}, fmt.Errorf("mcp server %q is not a stdio server", server.Name)
+	}
+	if err := c.replaceServer(server); err != nil {
+		return DiscoveredServer{}, err
+	}
+	return c.Discover(ctx, server.Name)
+}
+
 // Discover runs tools/list for one configured stdio server.
 func (c *StdioClient) Discover(ctx context.Context, serverName string) (DiscoveredServer, error) {
 	server, err := c.server(serverName)
@@ -238,6 +253,22 @@ func (c *StdioClient) closeSession(name string) {
 	if session != nil {
 		_ = session.Close()
 	}
+}
+
+func (c *StdioClient) replaceServer(server ServerConfig) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("stdio MCP client is closed")
+	}
+	c.servers[server.Name] = server
+	session := c.sessions[server.Name]
+	delete(c.sessions, server.Name)
+	c.mu.Unlock()
+	if session != nil {
+		_ = session.Close()
+	}
+	return nil
 }
 
 type stdioRequest struct {

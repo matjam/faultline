@@ -126,6 +126,29 @@ func TestStdioClientRestartClosesNamedSessionAndRediscoverStartsFresh(t *testing
 	}
 }
 
+func TestStdioClientRestartWithConfigUsesFreshServerConfig(t *testing.T) {
+	runner := &restartableStdioRunner{}
+	client := NewStdioClient(
+		[]ServerConfig{helperStdioServerConfig(t, "tools/list")},
+		runner,
+		time.Minute,
+	)
+	defer client.Close()
+
+	if _, err := client.Discover(context.Background(), "local"); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	fresh := helperStdioServerConfig(t, "tools/list")
+	fresh.Command = "fresh-mcp"
+	if _, err := client.RestartWithConfig(context.Background(), fresh); err != nil {
+		t.Fatalf("RestartWithConfig: %v", err)
+	}
+
+	if got := runner.commands[1]; got != "fresh-mcp" {
+		t.Fatalf("second command = %q, want fresh-mcp", got)
+	}
+}
+
 func TestStdioClientIncludesStderrWhenResponseEOF(t *testing.T) {
 	client := NewStdioClient(
 		[]ServerConfig{helperStdioServerConfig(t, "tools/list")},
@@ -392,12 +415,14 @@ func (p *statefulStdioProcess) Wait() error {
 }
 
 type restartableStdioRunner struct {
-	starts atomic.Int32
-	closed atomic.Int32
+	starts   atomic.Int32
+	closed   atomic.Int32
+	commands []string
 }
 
 func (r *restartableStdioRunner) Start(ctx context.Context, cmd StdioCommand) (StdioProcess, error) {
 	r.starts.Add(1)
+	r.commands = append(r.commands, cmd.Command)
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()
 	proc := &statefulStdioProcess{

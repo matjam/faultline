@@ -15,6 +15,10 @@ type stdioRestarter interface {
 	Restart(ctx context.Context, serverName string) (DiscoveredServer, error)
 }
 
+type stdioConfigRestarter interface {
+	RestartWithConfig(ctx context.Context, server ServerConfig) (DiscoveredServer, error)
+}
+
 // NewRouter creates a caller that can route by server name.
 func NewRouter() *Router {
 	return &Router{callers: make(map[string]Caller)}
@@ -46,6 +50,20 @@ func (r *Router) RestartStdioServer(ctx context.Context, serverName string) (Dis
 		return DiscoveredServer{}, fmt.Errorf("mcp server %q is not a stdio server", serverName)
 	}
 	return restarter.Restart(ctx, serverName)
+}
+
+// RestartStdioServerWithConfig refreshes one stdio server's live config before
+// restarting its session.
+func (r *Router) RestartStdioServerWithConfig(ctx context.Context, server ServerConfig) (DiscoveredServer, error) {
+	caller, ok := r.callers[server.Name]
+	if !ok {
+		return DiscoveredServer{}, fmt.Errorf("mcp server %q is not configured", server.Name)
+	}
+	restarter, ok := caller.(stdioConfigRestarter)
+	if !ok {
+		return DiscoveredServer{}, fmt.Errorf("mcp server %q is not a stdio server", server.Name)
+	}
+	return restarter.RestartWithConfig(ctx, server)
 }
 
 // Close releases transport clients that hold long-lived resources.

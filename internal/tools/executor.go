@@ -1674,22 +1674,26 @@ func (te *Executor) mcpRestartStdioServer(ctx context.Context, argsJSON string) 
 	if args.ServerName == "" {
 		return "Error: server_name is required"
 	}
+	freshServer, err := te.currentMCPServer(args.ServerName)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if freshServer.Transport != "stdio" {
+		return fmt.Sprintf("Error: mcp server %q is not a stdio server", args.ServerName)
+	}
 	if !te.knownMCPServer(args.ServerName) {
 		return fmt.Sprintf("Error: mcp server %q is not configured", args.ServerName)
-	}
-	if !te.knownStdioMCPServer(args.ServerName) {
-		return fmt.Sprintf("Error: mcp server %q is not a stdio server", args.ServerName)
 	}
 	if te.mcpCaller == nil {
 		return "MCP caller is not configured."
 	}
 	restarter, ok := te.mcpCaller.(interface {
-		RestartStdioServer(context.Context, string) (mcp.DiscoveredServer, error)
+		RestartStdioServerWithConfig(context.Context, mcp.ServerConfig) (mcp.DiscoveredServer, error)
 	})
 	if !ok {
 		return "MCP caller does not support stdio restart."
 	}
-	discovered, err := restarter.RestartStdioServer(ctx, args.ServerName)
+	discovered, err := restarter.RestartStdioServerWithConfig(ctx, freshServer)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
@@ -1697,19 +1701,26 @@ func (te *Executor) mcpRestartStdioServer(ctx context.Context, argsJSON string) 
 	return fmt.Sprintf("MCP stdio server %q restarted.", args.ServerName)
 }
 
+func (te *Executor) currentMCPServer(name string) (mcp.ServerConfig, error) {
+	if te.mcpConfigFile == "" {
+		return mcp.ServerConfig{}, fmt.Errorf("MCP config file is not configured")
+	}
+	cfg, _, _, err := te.currentMCPConfig()
+	if err != nil {
+		return mcp.ServerConfig{}, err
+	}
+	for _, server := range cfg.Servers {
+		if server.Name == name {
+			return server, nil
+		}
+	}
+	return mcp.ServerConfig{}, fmt.Errorf("mcp server %q is not present in current MCP config", name)
+}
+
 func (te *Executor) knownMCPServer(name string) bool {
 	for _, discovered := range te.mcpDiscovered {
 		if discovered.Server.Name == name {
 			return true
-		}
-	}
-	return false
-}
-
-func (te *Executor) knownStdioMCPServer(name string) bool {
-	for _, discovered := range te.mcpDiscovered {
-		if discovered.Server.Name == name {
-			return discovered.Server.Transport == "stdio"
 		}
 	}
 	return false
