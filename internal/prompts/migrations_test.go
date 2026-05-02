@@ -31,6 +31,49 @@ func TestLoadMigrationsReturnsShipped(t *testing.T) {
 	}
 }
 
+// TestMigration001ShipsAutonomyPrompts verifies the autonomy-prompts-v1
+// migration (id 001) is loaded and contains the load-bearing pieces:
+// the idempotency short-circuit, the verbatim identity-core block, the
+// changelog block, and the compaction softening. If any of these go
+// missing the migration would silently corrupt deployments.
+func TestMigration001ShipsAutonomyPrompts(t *testing.T) {
+	migs, err := LoadMigrations()
+	if err != nil {
+		t.Fatalf("LoadMigrations: %v", err)
+	}
+	var m *Migration
+	for i := range migs {
+		if migs[i].ID == 1 {
+			m = &migs[i]
+			break
+		}
+	}
+	if m == nil {
+		t.Fatalf("migration 001 not loaded; got ids: %v", ids(migs))
+	}
+	for _, want := range []string{
+		"already applied",             // idempotency short-circuit message
+		"<<<IDENTITY_CORE_BEGIN>>>",   // identity scaffold fence
+		"<<<CHANGELOG_BEGIN>>>",       // changelog scaffold fence
+		"<<<COMPACTION_FIRST_LINE>>>", // compaction soften fence
+		"identity/core.md",            // path the migration creates
+		"prompts/changelog.md",        // path the migration creates
+		"breath, not death",           // softened compaction framing
+	} {
+		if !strings.Contains(m.Body, want) {
+			t.Errorf("migration 001 body missing %q", want)
+		}
+	}
+}
+
+func ids(ms []Migration) []int {
+	out := make([]int, len(ms))
+	for i, m := range ms {
+		out[i] = m.ID
+	}
+	return out
+}
+
 func TestPendingMigrationsFiltersApplied(t *testing.T) {
 	all := []Migration{
 		{ID: 0, Slug: "a", Body: "x"},
