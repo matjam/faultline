@@ -1,0 +1,23 @@
+{{define "content"}}
+<div class="flex flex-col gap-4">
+  <h1 class="terminal-section-title">// subagent stream</h1>
+
+  <p class="text-sm opacity-70">
+    Live view of running children plus the operator-configured profile catalog.
+    Read-only here; the primary agent dispatches subagents via the
+    <code>subagent_run</code> / <code>subagent_spawn</code> tools.
+  </p>
+
+  <div id="subagents-page"
+       hx-get="/admin/fragments/subagents"
+       hx-trigger="load, every 2s"
+       hx-swap="innerHTML">
+    <div class="card bg-base-100">
+      <div class="card-body">
+        <div class="skeleton h-6 w-32 mb-2"></div>
+        <div class="skeleton h-4 w-full"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}

@@ -23,7 +23,7 @@ type loginData struct {
 // are redirected straight to the dashboard so the form isn't
 // reachable when there's nothing to do.
 //
-// We mint a *transient* CSRF token tied to the form via a short-lived
+// We attach a *transient* CSRF token to the form via a short-lived
 // cookie, so even pre-authentication forms cannot be cross-site
 // posted. On successful login the real session takes over.
 func (s *Server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +32,7 @@ func (s *Server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	csrf, err := s.issueLoginCSRF(w)
+	csrf, err := s.ensureLoginCSRF(w, r)
 	if err != nil {
 		s.deps.Logger.Error("admin: issue login csrf", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -78,8 +78,8 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 			"username", username,
 			"remote", r.RemoteAddr,
 			"reason", classify(err))
-		// Re-issue a fresh login CSRF for the retry.
-		csrf, ierr := s.issueLoginCSRF(w)
+		// Refresh (or mint, if missing) the login CSRF for the retry.
+		csrf, ierr := s.ensureLoginCSRF(w, r)
 		if ierr != nil {
 			s.deps.Logger.Error("admin: issue login csrf", "error", ierr)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -170,28 +170,55 @@ func classify(err error) string {
 // --- login-form CSRF ------------------------------------------------
 //
 // The login form has no session yet, so the standard per-session
-// CSRF token doesn't apply. Instead we issue a short-lived random
+// CSRF token doesn't apply. Instead we attach a short-lived random
 // token in a separate cookie and require the form to echo it back.
-// On any login attempt the cookie is rotated (issueLoginCSRF
-// always overwrites). This blocks naive CSRF on the login endpoint
-// without relying on the as-yet-nonexistent session.
+//
+// The cookie is *stable* across renders: we keep the same value as
+// long as the browser still has the cookie, only refreshing its
+// MaxAge. Rotating per render was tempting but turned out to race
+// with concurrent fragment polling — a stale tab polling
+// /admin/fragments/* gets 401-redirected to the login page (or a
+// non-HTMX client follows a 303), each redirect-follow re-rendered
+// the login form with a fresh cookie value, and any login form the
+// user already had open lost its CSRF match. Stability removes the
+// race; security is unchanged because the cookie is HttpOnly +
+// SameSite=Strict (no cross-site read or set), so an attacker can't
+// learn the value and the "form must echo cookie" check still does
+// the work.
 
 const loginCSRFCookie = "faultline_login_csrf"
 
-func (s *Server) issueLoginCSRF(w http.ResponseWriter) (string, error) {
+const loginCSRFTTL = 10 * time.Minute
+
+// ensureLoginCSRF returns the login-form CSRF token to embed in the
+// rendered form. If the request already carries a valid login-CSRF
+// cookie we reuse its value and refresh the cookie's MaxAge;
+// otherwise we mint and set a fresh one.
+func (s *Server) ensureLoginCSRF(w http.ResponseWriter, r *http.Request) (string, error) {
+	if existing, err := r.Cookie(loginCSRFCookie); err == nil && existing.Value != "" {
+		// Refresh MaxAge so an actively-used login page doesn't
+		// time out mid-edit. Same value, same attributes — the
+		// browser updates its TTL.
+		setLoginCSRFCookie(w, existing.Value)
+		return existing.Value, nil
+	}
 	tok, err := randomLoginToken()
 	if err != nil {
 		return "", err
 	}
+	setLoginCSRFCookie(w, tok)
+	return tok, nil
+}
+
+func setLoginCSRFCookie(w http.ResponseWriter, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     loginCSRFCookie,
-		Value:    tok,
+		Value:    value,
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int((10 * time.Minute).Seconds()),
+		MaxAge:   int(loginCSRFTTL.Seconds()),
 	})
-	return tok, nil
 }
 
 func (s *Server) checkLoginCSRF(r *http.Request) bool {

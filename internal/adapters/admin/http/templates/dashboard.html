@@ -1,21 +1,29 @@
 {{define "content"}}
-<div class="flex flex-col gap-6 mt-4">
+<div class="flex flex-col gap-4">
 
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-    <div class="stat bg-base-100 rounded-box shadow-sm">
-      <div class="stat-title">Faultline version</div>
-      <div class="stat-value text-2xl font-mono">{{.Version}}</div>
-      <div class="stat-desc">{{.GoVersion}}</div>
+  <h1 class="terminal-section-title">// status overview</h1>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+    <div class="card bg-base-100">
+      <div class="card-body">
+        <div class="text-xs opacity-60">faultline version</div>
+        <div class="stat-value glow">{{.Version}}</div>
+        <div class="text-xs opacity-60 mt-1">{{.GoVersion}}</div>
+      </div>
     </div>
-    <div class="stat bg-base-100 rounded-box shadow-sm">
-      <div class="stat-title">Process uptime</div>
-      <div class="stat-value text-2xl">{{.Uptime}}</div>
-      <div class="stat-desc">since {{.StartedAt}}</div>
+    <div class="card bg-base-100">
+      <div class="card-body">
+        <div class="text-xs opacity-60">process uptime</div>
+        <div class="stat-value glow">{{.Uptime}}</div>
+        <div class="text-xs opacity-60 mt-1">since {{.StartedAt}}</div>
+      </div>
     </div>
-    <div class="stat bg-base-100 rounded-box shadow-sm">
-      <div class="stat-title">Active admin sessions</div>
-      <div class="stat-value text-2xl">{{.SessionCount}}</div>
-      <div class="stat-desc">browsers signed in</div>
+    <div class="card bg-base-100">
+      <div class="card-body">
+        <div class="text-xs opacity-60">active admin sessions</div>
+        <div class="stat-value glow">{{.SessionCount}}</div>
+        <div class="text-xs opacity-60 mt-1">browsers signed in</div>
+      </div>
     </div>
   </div>
 
@@ -23,57 +31,9 @@
        hx-get="/admin/fragments/status"
        hx-trigger="load, every 1s"
        hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
+    <div class="card bg-base-100">
       <div class="card-body">
         <div class="skeleton h-6 w-48 mb-2"></div>
-        <div class="skeleton h-4 w-full"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="subagents"
-       hx-get="/admin/fragments/subagents"
-       hx-trigger="load, every 2s"
-       hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
-      <div class="card-body">
-        <div class="skeleton h-6 w-32 mb-2"></div>
-        <div class="skeleton h-4 w-full"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="skills-card"
-       hx-get="/admin/fragments/skills"
-       hx-trigger="load"
-       hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
-      <div class="card-body">
-        <div class="skeleton h-6 w-32 mb-2"></div>
-        <div class="skeleton h-4 w-full"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="update-card"
-       hx-get="/admin/fragments/update"
-       hx-trigger="load, every 30s"
-       hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
-      <div class="card-body">
-        <div class="skeleton h-6 w-32 mb-2"></div>
-        <div class="skeleton h-4 w-full"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="config-card"
-       hx-get="/admin/fragments/config"
-       hx-trigger="load"
-       hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
-      <div class="card-body">
-        <div class="skeleton h-6 w-32 mb-2"></div>
         <div class="skeleton h-4 w-full"></div>
       </div>
     </div>
@@ -83,7 +43,7 @@
        hx-get="/admin/fragments/tools"
        hx-trigger="load, every 1s"
        hx-swap="innerHTML">
-    <div class="card bg-base-100 shadow-sm">
+    <div class="card bg-base-100">
       <div class="card-body">
         <div class="skeleton h-6 w-40 mb-2"></div>
         <div class="skeleton h-4 w-full"></div>

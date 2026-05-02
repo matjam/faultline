@@ -3,13 +3,11 @@ package adminhttp
 import (
 	"html/template"
 	"net/http"
-	"runtime"
 	"time"
 
 	"github.com/matjam/faultline/internal/agent"
 	"github.com/matjam/faultline/internal/subagent"
 	"github.com/matjam/faultline/internal/tools"
-	"github.com/matjam/faultline/internal/version"
 )
 
 // templateFuncs returns the FuncMap shared by every template the
@@ -40,9 +38,6 @@ func templateFuncs() template.FuncMap {
 			return p
 		},
 		"phaseClass": func(p agent.Phase) string {
-			// daisyUI badge classes keyed off phase. Operator
-			// scans the dashboard for status at a glance; color
-			// coding helps.
 			switch p {
 			case agent.PhaseGenerating:
 				return "badge-info"
@@ -72,22 +67,11 @@ func templateFuncs() template.FuncMap {
 // dashboardPage is the data passed to dashboard.html on first load.
 // The fragments below carry their own narrower view models.
 type dashboardPage struct {
-	Title         string
-	Authenticated bool
-	Username      string
-	CSRFToken     string
-
-	Version   string
-	GoVersion string
-
-	StartedAt    string
-	Uptime       string
+	pageData
 	SessionCount int
 }
 
-// fragStatusData backs frag_status.html — the agent status card and
-// stats grid. Includes derived values (Uptime, etc.) so the template
-// stays free of arithmetic.
+// fragStatusData backs frag_status.html — the agent status card.
 type fragStatusData struct {
 	HasAgent bool
 	Snapshot agent.AgentSnapshot
@@ -104,16 +88,13 @@ type fragStatusData struct {
 // fragToolsData backs frag_tools.html — the recent tool calls table.
 type fragToolsData struct {
 	Events []tools.ToolCallEvent
-	// Newest is reversed (most recent first) for display; the
-	// template iterates over Newest, not Events.
 	Newest []tools.ToolCallEvent
 	Total  int
 	Cap    int
 }
 
 // fragSubagentsData backs frag_subagents.html — the live children
-// table. Profiles are surfaced separately so the dashboard can show
-// "you have N profiles available, M active right now".
+// table.
 type fragSubagentsData struct {
 	HasManager bool
 	Active     []subagent.ActiveStatus
@@ -121,22 +102,37 @@ type fragSubagentsData struct {
 }
 
 // handleDashboard renders the dashboard shell. The dynamic fragments
-// (status, tools, subagents) load via HTMX after first paint.
+// (status, tools) load via HTMX after first paint.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFromContext(r.Context())
-	uptime := time.Since(s.deps.StartedAt).Round(time.Second)
 	data := dashboardPage{
-		Title:         "Dashboard",
-		Authenticated: true,
-		Username:      sess.Username,
-		CSRFToken:     sess.CSRFToken,
-		Version:       version.String(),
-		GoVersion:     runtime.Version(),
-		StartedAt:     s.deps.StartedAt.UTC().Format(time.RFC3339),
-		Uptime:        uptime.String(),
-		SessionCount:  s.deps.Sessions.Count(),
+		pageData:     s.basePageData(r, "dashboard"),
+		SessionCount: s.deps.Sessions.Count(),
 	}
 	s.render(w, "dashboard.html", data)
+}
+
+// handleSubagentsPage renders the subagent section.
+func (s *Server) handleSubagentsPage(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		pageData
+	}{pageData: s.basePageData(r, "subagents")}
+	s.render(w, "subagents.html", data)
+}
+
+// handleSkillsPage renders the skills section.
+func (s *Server) handleSkillsPage(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		pageData
+	}{pageData: s.basePageData(r, "skills")}
+	s.render(w, "skills.html", data)
+}
+
+// handleVersionPage renders the version & updates section.
+func (s *Server) handleVersionPage(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		pageData
+	}{pageData: s.basePageData(r, "version")}
+	s.render(w, "version.html", data)
 }
 
 // handleFragStatus renders the live agent status fragment.
@@ -169,10 +165,6 @@ func (s *Server) handleFragStatus(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleFragTools(w http.ResponseWriter, _ *http.Request) {
 	data := fragToolsData{}
 	if s.deps.Tools != nil {
-		// Cap the table at 50 rows; the buffer is much larger,
-		// but rendering 500 rows on every poll is wasteful and
-		// the operator scrolls to history less often than they
-		// glance at "what just happened".
 		data.Newest = reverseEvents(s.deps.Tools.SnapshotRecent(50))
 		data.Events = data.Newest
 		data.Total = s.deps.Tools.Len()
@@ -203,8 +195,6 @@ func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Discourage proxies from caching; the fragment changes on
-	// every poll.
 	w.Header().Set("Cache-Control", "no-store")
 	if err := t.Execute(w, data); err != nil {
 		s.deps.Logger.Error("renderFragment: execute",
@@ -212,8 +202,7 @@ func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
 	}
 }
 
-// reverseEvents returns a copy of events with the order flipped, so
-// the most recent event is first. Used by the tools fragment.
+// reverseEvents returns a copy of events with the order flipped.
 func reverseEvents(events []tools.ToolCallEvent) []tools.ToolCallEvent {
 	out := make([]tools.ToolCallEvent, len(events))
 	for i, e := range events {

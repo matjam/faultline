@@ -1,0 +1,8 @@
+<div class="log-view" id="log-view-inner">{{if .Err}}<span class="lvl-error">[error] {{.Err}}</span>{{else}}{{if .Empty}}<span class="opacity-60">// no log entries yet for {{.Today}}</span>{{else}}{{range .Lines}}<span class="lvl-{{.Level}}">{{.Text}}</span>
+{{end}}{{end}}{{end}}</div>
+<script>
+(function () {
+  var el = document.getElementById("log-view-inner");
+  if (el) el.scrollTop = el.scrollHeight;
+})();
+</script>
