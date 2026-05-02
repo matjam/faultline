@@ -190,6 +190,24 @@ func TestDefaultSystemPromptIncludesMCPGuidance(t *testing.T) {
 	}
 }
 
+// TestDefaultSystemPromptIncludesAutonomyConventions guards the
+// identity-vs-operating split and the changelog convention added in the
+// autonomy-prompts-v1 work. The matching migration (001) gates its
+// system.md edits on the presence of these substrings, so accidentally
+// removing them from the default would silently re-apply the migration
+// on every fresh deployment.
+func TestDefaultSystemPromptIncludesAutonomyConventions(t *testing.T) {
+	for _, want := range []string{
+		"identity/core.md",
+		"prompts/changelog.md",
+		"meta/state-summary.md",
+	} {
+		if !strings.Contains(defaultSystem, want) {
+			t.Fatalf("default system prompt missing %q", want)
+		}
+	}
+}
+
 func TestLoad_PreservesUserEdits(t *testing.T) {
 	m := newMemStore()
 	custom := "MY CUSTOM SYSTEM PROMPT"
@@ -220,9 +238,28 @@ func TestLoadAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, want := range []string{"system", "compaction", "cycle-start", "continue", "shutdown"} {
+	for _, want := range []string{"system", "compaction", "cycle-start", "continue", "shutdown", "identity-core", "changelog"} {
 		if _, ok := prompts[want]; !ok {
 			t.Errorf("LoadAll missing prompt %q", want)
 		}
+	}
+}
+
+// TestLoadAllSeedsAutonomyConventions verifies that loading the
+// identity-core and changelog prompts seeds them at the documented
+// memory paths (identity/core.md and prompts/changelog.md), not at the
+// default prompts/<name>.md locations. Matters because the migration
+// idempotency check and the system.md text both reference those exact
+// paths.
+func TestLoadAllSeedsAutonomyConventions(t *testing.T) {
+	m := newMemStore()
+	if _, err := LoadAll(m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Read("identity/core.md"); err != nil {
+		t.Errorf("identity/core.md not seeded: %v", err)
+	}
+	if _, err := m.Read("prompts/changelog.md"); err != nil {
+		t.Errorf("prompts/changelog.md not seeded: %v", err)
 	}
 }

@@ -34,6 +34,12 @@ var (
 
 	//go:embed templates/shutdown.md
 	defaultShutdown string
+
+	//go:embed templates/identity-core.md
+	defaultIdentityCore string
+
+	//go:embed templates/changelog.md
+	defaultChangelog string
 )
 
 // Store is the persistence backend used to read and seed prompt files.
@@ -120,6 +126,14 @@ func init() {
 		"shutdown": {
 			path:         "prompts/shutdown.md",
 			defaultValue: defaultShutdown,
+		},
+		"identity-core": {
+			path:         "identity/core.md",
+			defaultValue: defaultIdentityCore,
+		},
+		"changelog": {
+			path:         "prompts/changelog.md",
+			defaultValue: defaultChangelog,
 		},
 	}
 }
