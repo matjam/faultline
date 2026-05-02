@@ -143,6 +143,65 @@ stdio_idle_timeout = "30s"
 	}
 }
 
+func TestLoadConfig_AdminUIDefaultsToMatrix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[api]
+url = "http://example.com/v1"
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Admin.UI != "matrix" {
+		t.Errorf("Admin.UI = %q, want matrix", cfg.Admin.UI)
+	}
+}
+
+func TestLoadConfig_AdminUIOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[admin]
+enabled = true
+ui = "modern"
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Admin.UI != "modern" {
+		t.Errorf("Admin.UI = %q, want modern", cfg.Admin.UI)
+	}
+}
+
+func TestLoadConfig_InvalidAdminUI(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[admin]
+ui = "neon"
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid admin ui error")
+	}
+}
+
 func TestLoadConfig_DurationParsing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

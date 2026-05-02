@@ -2,3 +2,12 @@
 # doesn't also swallow the cmd/faultline/ source directory or any
 # future "faultline" file/directory deeper in the tree.
 /faultline
+
+/memory
+/logs
+/sandbox
+/logs
+/users.toml
+/skills.toml
+/mcp.json
+/config.toml

@@ -61,6 +61,11 @@ type Deps struct {
 	// not-configured placeholder).
 	LogDir string
 
+	// UI selects the admin shell. "matrix" is the legacy terminal-style
+	// view; "modern" enables a cleaner shell with browser light/dark
+	// selection.
+	UI string
+
 	// Agent is the live primary agent inspector.
 	Agent AgentInspector
 
@@ -128,6 +133,9 @@ func New(deps Deps) (*Server, error) {
 	}
 	if deps.Logger == nil {
 		return nil, errors.New("adminhttp: nil logger")
+	}
+	if deps.UI == "" {
+		deps.UI = "matrix"
 	}
 
 	layoutBytes, err := fs.ReadFile(templateFS, "templates/layout.html")

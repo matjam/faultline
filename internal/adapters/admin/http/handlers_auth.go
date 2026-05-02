@@ -17,6 +17,10 @@ type loginData struct {
 	Error         string
 	CSRFToken     string // pre-session CSRF (form-only, not yet bound)
 	Next          string
+	UI            string
+	Theme         string
+	IsModern      bool
+	IsMatrix      bool
 }
 
 // handleLoginGet renders the login form. Already-authenticated users
@@ -44,6 +48,10 @@ func (s *Server) handleLoginGet(w http.ResponseWriter, r *http.Request) {
 		Authenticated: false,
 		CSRFToken:     csrf,
 		Next:          safeNext(r.URL.Query().Get("next")),
+		UI:            s.deps.UI,
+		Theme:         themeForUI(s.deps.UI),
+		IsModern:      s.deps.UI == "modern",
+		IsMatrix:      s.deps.UI == "matrix",
 	}
 	s.render(w, "login.html", data)
 }
@@ -92,6 +100,10 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 			Error:         "Invalid username or password.",
 			CSRFToken:     csrf,
 			Next:          next,
+			UI:            s.deps.UI,
+			Theme:         themeForUI(s.deps.UI),
+			IsModern:      s.deps.UI == "modern",
+			IsMatrix:      s.deps.UI == "matrix",
 		}
 		w.WriteHeader(http.StatusUnauthorized)
 		s.render(w, "login.html", data)
@@ -105,18 +117,15 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the session cookie. HttpOnly + SameSite=Lax on a
-	// loopback bind covers the realistic threat model (browser-
-	// side XSS, naive CSRF). Secure is gated on a forwarded TLS
-	// hint so reverse-proxy deployments keep the flag without
-	// breaking direct loopback.
+	// Set the session cookie. HttpOnly + Secure + SameSite=Lax covers
+	// browser-side XSS, cleartext transit, and naive CSRF.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sess.Token,
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   isLikelyTLS(r),
+		Secure:   true,
 		// Session cookie (no MaxAge): expires when the browser
 		// closes, in addition to the server-side TTL eviction.
 	})
@@ -126,7 +135,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	clearLoginCSRF(w)
 
 	s.deps.Logger.Info("admin: login ok", "username", user.Name, "remote", r.RemoteAddr)
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	redirectSameOrigin(w, next)
 }
 
 // handleLogout deletes the session and redirects to the login form.
@@ -143,12 +152,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   isLikelyTLS(r),
+		Secure:   true,
 		MaxAge:   -1,
 	})
 
 	s.deps.Logger.Info("admin: logout", "username", sess.Username)
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	redirectSameOrigin(w, "/admin/login")
 }
 
 // classify returns a short string for log purposes without leaking
@@ -189,6 +198,7 @@ func (s *Server) issueLoginCSRF(w http.ResponseWriter) (string, error) {
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
 		MaxAge:   int((10 * time.Minute).Seconds()),
 	})
 	return tok, nil
@@ -215,8 +225,14 @@ func clearLoginCSRF(w http.ResponseWriter) {
 		Path:     "/admin",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
 		MaxAge:   -1,
 	})
+}
+
+func redirectSameOrigin(w http.ResponseWriter, target string) {
+	w.Header().Set("Location", safeNext(target))
+	w.WriteHeader(http.StatusSeeOther)
 }
 
 // randomLoginToken matches the entropy of session tokens but lives
@@ -224,19 +240,4 @@ func clearLoginCSRF(w http.ResponseWriter) {
 // evolve independently.
 func randomLoginToken() (string, error) {
 	return users.NewToken()
-}
-
-// isLikelyTLS reports whether the request reached us via TLS (either
-// directly — we don't terminate TLS, but a future caller might — or
-// through a reverse proxy that set X-Forwarded-Proto=https). We use
-// this only to set the Secure cookie flag; getting it wrong on a
-// loopback dev setup just means the cookie isn't marked Secure.
-func isLikelyTLS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	if v := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(v, "https") {
-		return true
-	}
-	return false
 }

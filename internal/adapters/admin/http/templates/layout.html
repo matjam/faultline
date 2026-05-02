@@ -1,19 +1,26 @@
 {{define "layout"}}<!doctype html>
-<html lang="en" data-theme="matrix">
+<html lang="en" data-admin-ui="{{.UI}}" data-theme="{{.Theme}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{.Title}} :: faultline</title>
+  {{if .IsMatrix}}
   <link rel="preload" href="/admin/static/fonts/vt323.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/admin/static/fonts/sharetechmono.woff2" as="font" type="font/woff2" crossorigin>
+  {{end}}
   <link rel="stylesheet" href="/admin/static/daisyui.css">
   <link rel="stylesheet" href="/admin/static/daisyui-themes.css">
+  {{if .IsModern}}
+  <link rel="stylesheet" href="/admin/static/modern.css">
+  <script src="/admin/static/modern-theme.js"></script>
+  {{else}}
   <link rel="stylesheet" href="/admin/static/terminal.css">
+  {{end}}
   <script src="/admin/static/tailwind.js"></script>
   <script src="/admin/static/htmx.min.js"></script>
   <link rel="icon" href="data:,">
 </head>
-<body class="bg-base-200 min-h-screen" hx-boost="true">
+<body class="bg-base-200 min-h-screen faultline-ui-{{.UI}}" hx-boost="true">
   {{if .Authenticated}}
     <div class="drawer lg:drawer-open">
       <input id="faultline-drawer" type="checkbox" class="drawer-toggle">
@@ -51,6 +58,7 @@
           </ul>
 
           <div class="mt-auto px-4 py-3 border-t border-base-300">
+            <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token - Go template CSRF is carried in _csrf below. -->
             <form method="POST" action="/admin/logout">
               <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
               <button class="btn btn-sm btn-ghost w-full justify-start"
@@ -89,6 +97,11 @@
     </span>
   </div>
   <div class="flex-none gap-3 text-xs opacity-70">
+    {{if .IsModern}}
+    <button type="button" class="btn btn-sm btn-ghost" data-theme-toggle>
+      <span data-theme-label>theme</span>
+    </button>
+    {{end}}
     <span class="hidden md:inline">
       uptime <span class="font-mono">{{.Uptime}}</span>
     </span>

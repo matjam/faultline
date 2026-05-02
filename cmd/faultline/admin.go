@@ -103,6 +103,7 @@ func buildAdmin(ctx context.Context, cfg *config.Config, startedAt time.Time, lo
 		Logger:        logger,
 		RequestLogger: requestLogger,
 		LogDir:        cfg.Log.Dir,
+		UI:            cfg.Admin.UI,
 		Tools:         toolBuf,
 	})
 	if err != nil {

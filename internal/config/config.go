@@ -428,6 +428,11 @@ type AdminConfig struct {
 	// "./skills.toml".
 	SkillsFile string `toml:"skills_file"`
 
+	// UI selects the admin UI shell. "matrix" keeps the terminal-style
+	// theme; "modern" enables the clean shell with browser light/dark
+	// selection. Default "matrix".
+	UI string `toml:"ui"`
+
 	// SessionTTL is the idle timeout for an admin session.
 	// Sessions older than this with no activity are evicted from
 	// the in-memory session store. Default 12h.
@@ -545,6 +550,7 @@ func Default() *Config {
 			Bind:       "127.0.0.1:8742",
 			UsersFile:  "./users.toml",
 			SkillsFile: "./skills.toml",
+			UI:         "matrix",
 			SessionTTL: duration(12 * time.Hour),
 		},
 	}
@@ -618,6 +624,13 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Admin.SkillsFile == "" {
 		cfg.Admin.SkillsFile = "./skills.toml"
+	}
+	switch cfg.Admin.UI {
+	case "", "matrix":
+		cfg.Admin.UI = "matrix"
+	case "modern":
+	default:
+		return nil, fmt.Errorf("admin.ui must be \"matrix\" or \"modern\"")
 	}
 	if cfg.Admin.SessionTTL.Duration() <= 0 {
 		cfg.Admin.SessionTTL = duration(12 * time.Hour)

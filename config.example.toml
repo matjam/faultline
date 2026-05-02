@@ -444,6 +444,10 @@ users_file = "./users.toml"
 # meaningful when [skills] is also enabled.
 skills_file = "./skills.toml"
 
+# UI shell: "matrix" keeps the terminal-style interface; "modern"
+# enables a cleaner shell with a browser-persisted light/dark toggle.
+ui = "matrix"
+
 # Idle session TTL. Sessions older than this with no activity are
 # evicted from the in-memory store, requiring a fresh login.
 session_ttl = "12h"

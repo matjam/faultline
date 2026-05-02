@@ -36,6 +36,11 @@ type pageData struct {
 	GoVersion string
 	Uptime    string
 	StartedAt string
+
+	UI       string
+	Theme    string
+	IsModern bool
+	IsMatrix bool
 }
 
 type navItem struct {
@@ -95,10 +100,21 @@ func (s *Server) basePageData(r *http.Request, section string) pageData {
 		GoVersion:     runtime.Version(),
 		Uptime:        uptime.String(),
 		StartedAt:     s.deps.StartedAt.UTC().Format(time.RFC3339),
+		UI:            s.deps.UI,
+		Theme:         themeForUI(s.deps.UI),
+		IsModern:      s.deps.UI == "modern",
+		IsMatrix:      s.deps.UI == "matrix",
 	}
 	if sess != nil {
 		pd.Username = sess.Username
 		pd.CSRFToken = sess.CSRFToken
 	}
 	return pd
+}
+
+func themeForUI(ui string) string {
+	if ui == "modern" {
+		return "light"
+	}
+	return "matrix"
 }

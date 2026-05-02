@@ -1,4 +1,41 @@
 {{define "content"}}
+{{if .IsModern}}
+<div class="modern-login-shell">
+  <div class="modern-login-card">
+    <div class="mb-6">
+      <div class="text-sm font-semibold opacity-60">Faultline Admin</div>
+      <h1 class="text-3xl font-bold tracking-tight mt-2">Sign in to Faultline</h1>
+      <p class="text-sm opacity-70 mt-2">Manage the agent, configuration, tools, and runtime status.</p>
+    </div>
+
+    {{if .Error}}
+    <div class="alert alert-error mb-4">
+      <span>{{.Error}}</span>
+    </div>
+    {{end}}
+
+    <form method="POST" action="/admin/login" class="flex flex-col gap-4">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="next" value="{{.Next}}">
+
+      <label class="block">
+        <span class="text-sm font-medium block mb-2">Username</span>
+        <input type="text" name="username" required autofocus
+               autocomplete="username"
+               class="input input-bordered w-full"
+               value="{{.Username}}">
+      </label>
+      <label class="block">
+        <span class="text-sm font-medium block mb-2">Password</span>
+        <input type="password" name="password" required
+               autocomplete="current-password"
+               class="input input-bordered w-full">
+      </label>
+      <button type="submit" class="btn btn-primary mt-2">Sign in</button>
+    </form>
+  </div>
+</div>
+{{else}}
 <canvas id="matrix-rain" class="matrix-rain"></canvas>
 
 <div class="login-shell">
@@ -35,4 +72,5 @@
 </div>
 
 <script src="/admin/static/matrixrain.js" defer></script>
+{{end}}
 {{end}}

@@ -71,6 +71,51 @@ func newTestServer(t *testing.T) *testServer {
 	}
 }
 
+func newTestServerWithUI(t *testing.T, ui string) *testServer {
+	t.Helper()
+
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "users.toml")
+	store, boot, err := users.New(usersPath)
+	if err != nil {
+		t.Fatalf("users.New: %v", err)
+	}
+	if boot == nil {
+		t.Fatalf("expected bootstrap on fresh dir")
+	}
+
+	ctx := context.Background()
+	sessions := users.NewSessionStore(ctx, time.Hour)
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	srv, err := New(Deps{
+		Bind:      "127.0.0.1:0",
+		Users:     store,
+		Sessions:  sessions,
+		StartedAt: time.Now(),
+		Logger:    logger,
+		UI:        ui,
+	})
+	if err != nil {
+		t.Fatalf("adminhttp.New: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.routes(mux)
+	hs := httptest.NewServer(srv.requestLogger(mux))
+	t.Cleanup(func() {
+		hs.Close()
+		sessions.Close()
+	})
+
+	return &testServer{
+		srv:      hs,
+		users:    store,
+		sessions: sessions,
+		password: boot.Password,
+	}
+}
+
 // noFollowClient returns an HTTP client that does NOT follow
 // redirects, so tests can assert on the redirect itself.
 func noFollowClient(jar http.CookieJar) *http.Client {
@@ -140,6 +185,9 @@ func TestServer_LoginGet_RendersForm(t *testing.T) {
 	var sawCSRF bool
 	for _, c := range resp.Cookies() {
 		if c.Name == "faultline_login_csrf" && c.Value != "" {
+			if !c.Secure {
+				t.Fatal("faultline_login_csrf cookie is not Secure")
+			}
 			sawCSRF = true
 		}
 	}
@@ -156,6 +204,111 @@ func TestServer_LoginGet_RendersForm(t *testing.T) {
 	}
 }
 
+func TestServer_ModernLoginOmitsMatrixChrome(t *testing.T) {
+	ts := newTestServerWithUI(t, "modern")
+	client := noFollowClient(newJar(t))
+	resp, err := client.Get(ts.srv.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET /admin/login: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	for _, want := range []string{
+		`data-admin-ui="modern"`,
+		`/admin/static/modern.css`,
+		`Sign in to Faultline`,
+		`Sign in`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("modern login missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{
+		`matrix-rain`,
+		`/admin/static/matrixrain.js`,
+		`secure shell`,
+		`▶ authenticate`,
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("modern login still contains Matrix chrome %q:\n%s", unwanted, got)
+		}
+	}
+}
+
+func TestServer_ModernUIUsesModernAssetsAndThemeToggle(t *testing.T) {
+	ts := newTestServerWithUI(t, "modern")
+	client := loggedInClient(t, ts)
+
+	resp, err := client.Get(ts.srv.URL + "/admin")
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	for _, want := range []string{
+		`data-admin-ui="modern"`,
+		`/admin/static/modern.css`,
+		`/admin/static/modern-theme.js`,
+		`data-theme-toggle`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("modern UI body missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `/admin/static/terminal.css`) {
+		t.Fatalf("modern UI should not load terminal.css:\n%s", got)
+	}
+}
+
+func TestServer_MatrixUIUsesTerminalAssetsWithoutThemeToggle(t *testing.T) {
+	ts := newTestServerWithUI(t, "matrix")
+	client := loggedInClient(t, ts)
+
+	resp, err := client.Get(ts.srv.URL + "/admin")
+	if err != nil {
+		t.Fatalf("GET /admin: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if !strings.Contains(got, `data-admin-ui="matrix"`) {
+		t.Fatalf("matrix UI body missing data-admin-ui:\n%s", got)
+	}
+	if !strings.Contains(got, `/admin/static/terminal.css`) {
+		t.Fatalf("matrix UI should load terminal.css:\n%s", got)
+	}
+	if strings.Contains(got, `data-theme-toggle`) {
+		t.Fatalf("matrix UI should not render modern theme toggle:\n%s", got)
+	}
+}
+
+func TestServer_ModernCSSDefinesConfigurationTabs(t *testing.T) {
+	ts := newTestServerWithUI(t, "modern")
+
+	resp, err := http.Get(ts.srv.URL + "/admin/static/modern.css")
+	if err != nil {
+		t.Fatalf("GET modern.css: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	for _, want := range []string{
+		`.matrix-tab-panel { display: none; }`,
+		`.matrix-tab-panel.active { display: block; }`,
+		`.faultline-ui-modern .matrix-tab-strip`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("modern.css missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestServer_LoginPost_NoCSRF_Rejected(t *testing.T) {
 	ts := newTestServer(t)
 	resp, err := http.PostForm(ts.srv.URL+"/admin/login", url.Values{
@@ -168,6 +321,21 @@ func TestServer_LoginPost_NoCSRF_Rejected(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestSafeNextRejectsExternalRedirects(t *testing.T) {
+	cases := map[string]string{
+		"":                     "/admin",
+		"https://evil.invalid": "/admin",
+		"//evil.invalid/admin": "/admin",
+		"/admin/configuration": "/admin/configuration",
+		"/admin?panel=version": "/admin?panel=version",
+	}
+	for input, want := range cases {
+		if got := safeNext(input); got != want {
+			t.Errorf("safeNext(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
@@ -204,6 +372,9 @@ func TestServer_FullLoginAndDashboard(t *testing.T) {
 	if loc := resp.Header.Get("Location"); loc != "/admin" {
 		t.Fatalf("Location = %q, want /admin", loc)
 	}
+	if cookie := findCookie(resp.Cookies(), sessionCookieName); cookie == nil || !cookie.Secure {
+		t.Fatalf("session cookie missing Secure flag: %#v", resp.Cookies())
+	}
 
 	// 3) GET /admin should now return 200 + dashboard content.
 	resp, err = client.Get(ts.srv.URL + "/admin")
@@ -228,6 +399,15 @@ func TestServer_FullLoginAndDashboard(t *testing.T) {
 	if !strings.Contains(string(body), `id="agent-status"`) {
 		t.Fatalf("dashboard body missing agent-status fragment slot: %s", body)
 	}
+}
+
+func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	return nil
 }
 
 func TestServer_LoginPost_WrongPassword(t *testing.T) {
