@@ -117,6 +117,8 @@ var subagentForbidden = map[string]struct{}{
 	"update_apply":              {},
 	"mcp_list_servers":          {},
 	"mcp_discover_tools":        {},
+	"mcp_read_config":           {},
+	"mcp_restart_stdio_server":  {},
 	"mcp_propose_config_update": {},
 	"mcp_update_config":         {},
 	"subagent_run":              {},
@@ -1305,6 +1307,10 @@ func (te *Executor) dispatch(ctx context.Context, call llm.ToolCall) string {
 		return te.mcpListServers()
 	case "mcp_discover_tools":
 		return te.mcpDiscoverTools()
+	case "mcp_read_config":
+		return te.mcpReadConfig()
+	case "mcp_restart_stdio_server":
+		return te.mcpRestartStdioServer(ctx, args)
 	case "mcp_propose_config_update":
 		return te.mcpProposeConfigUpdate(args)
 	case "mcp_update_config":
@@ -1396,6 +1402,20 @@ func (te *Executor) mcpManagementToolDefs() []llm.Tool {
 				Parameters:  params,
 			},
 		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
+				Name:        "mcp_restart_stdio_server",
+				Description: "Restart one configured stdio MCP server session and refresh discovery for that server. Use after changing stdio setup files or when a long-lived stdio server needs to pick up local changes.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"server_name": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"server_name"},
+				},
+			},
+		},
 	}
 }
 
@@ -1412,14 +1432,26 @@ func (te *Executor) mcpConfigToolDefs() []llm.Tool {
 		{
 			Type: llm.ToolTypeFunction,
 			Function: &llm.FunctionDef{
+				Name:        "mcp_read_config",
+				Description: "Read the current dedicated MCP config before proposing a change. Returns the full current config and config_hash; pass that hash as base_config_hash to mcp_propose_config_update.",
+				Parameters: map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			Type: llm.ToolTypeFunction,
+			Function: &llm.FunctionDef{
 				Name:        "mcp_propose_config_update",
 				Description: "Validate and propose an MCP config update. This creates a pending approval and does not write any files.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"config": configParam,
+						"base_config_hash": map[string]interface{}{"type": "string"},
+						"config":           configParam,
 					},
-					"required": []string{"config"},
+					"required": []string{"base_config_hash", "config"},
 				},
 			},
 		},
@@ -1457,15 +1489,43 @@ func (te *Executor) mcpDiscoverTools() string {
 	return marshalToolResult(statuses)
 }
 
+func (te *Executor) mcpReadConfig() string {
+	if !te.mcpConfigEdit || te.mcpConfigFile == "" || te.mcpApprovals == nil {
+		return "MCP config updates are not configured."
+	}
+	cfg, hash, _, err := te.currentMCPConfig()
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return marshalToolResult(struct {
+		Config     mcp.Config `json:"config"`
+		ConfigHash string     `json:"config_hash"`
+	}{
+		Config:     cfg,
+		ConfigHash: hash,
+	})
+}
+
 func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	var args struct {
-		Config mcp.Config `json:"config"`
+		BaseConfigHash string     `json:"base_config_hash"`
+		Config         mcp.Config `json:"config"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Error parsing arguments: %s", err)
 	}
 	if !te.mcpConfigEdit || te.mcpConfigFile == "" || te.mcpApprovals == nil {
 		return "MCP config updates are not configured."
+	}
+	if args.BaseConfigHash == "" {
+		return "Error: base_config_hash is required. Call mcp_read_config before proposing MCP config changes."
+	}
+	_, currentHash, _, err := te.currentMCPConfig()
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if args.BaseConfigHash != currentHash {
+		return "Error: stale base_config_hash. Call mcp_read_config again and propose a change against the current MCP config."
 	}
 	if err := args.Config.Validate(); err != nil {
 		return fmt.Sprintf("Error: %s", err)
@@ -1485,26 +1545,36 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\nconfig_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nAsk the collaborator to reply exactly with:\n%s", id, hash, diff, approvalText)
 }
 
+func (te *Executor) currentMCPConfig() (mcp.Config, string, string, error) {
+	cfg := mcp.Config{Servers: []mcp.ServerConfig{}}
+	currentJSON, err := canonicalMCPConfigJSON(cfg)
+	if err != nil {
+		return mcp.Config{}, "", "", err
+	}
+	data, err := os.ReadFile(te.mcpConfigFile)
+	if err != nil && !os.IsNotExist(err) {
+		return mcp.Config{}, "", "", fmt.Errorf("read current MCP config: %w", err)
+	}
+	if err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return mcp.Config{}, "", "", fmt.Errorf("parse current MCP config: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return mcp.Config{}, "", "", fmt.Errorf("validate current MCP config: %w", err)
+		}
+		currentJSON = string(data)
+	}
+	hash, err := mcp.ConfigHash(cfg)
+	if err != nil {
+		return mcp.Config{}, "", "", fmt.Errorf("hash current MCP config: %w", err)
+	}
+	return cfg, hash, currentJSON, nil
+}
+
 func (te *Executor) mcpConfigDiff(proposed mcp.Config) (string, error) {
-	current := mcp.Config{Servers: []mcp.ServerConfig{}}
-	currentJSON, err := canonicalMCPConfigJSON(current)
+	_, _, currentJSON, err := te.currentMCPConfig()
 	if err != nil {
 		return "", err
-	}
-	if te.mcpConfigFile != "" {
-		data, err := os.ReadFile(te.mcpConfigFile)
-		if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("read current MCP config for diff: %w", err)
-		}
-		if err == nil {
-			if err := json.Unmarshal(data, &current); err != nil {
-				return "", fmt.Errorf("parse current MCP config for diff: %w", err)
-			}
-			if err := current.Validate(); err != nil {
-				return "", fmt.Errorf("validate current MCP config for diff: %w", err)
-			}
-			currentJSON = string(data)
-		}
 	}
 
 	proposedJSON, err := canonicalMCPConfigJSON(proposed)
@@ -1592,6 +1662,78 @@ func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string
 		te.mcpDiscovered = discovered
 	}
 	return "MCP config updated."
+}
+
+func (te *Executor) mcpRestartStdioServer(ctx context.Context, argsJSON string) string {
+	var args struct {
+		ServerName string `json:"server_name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+	if args.ServerName == "" {
+		return "Error: server_name is required"
+	}
+	freshServer, err := te.currentMCPServer(args.ServerName)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	if freshServer.Transport != "stdio" {
+		return fmt.Sprintf("Error: mcp server %q is not a stdio server", args.ServerName)
+	}
+	if !te.knownMCPServer(args.ServerName) {
+		return fmt.Sprintf("Error: mcp server %q is not configured", args.ServerName)
+	}
+	if te.mcpCaller == nil {
+		return "MCP caller is not configured."
+	}
+	restarter, ok := te.mcpCaller.(interface {
+		RestartStdioServerWithConfig(context.Context, mcp.ServerConfig) (mcp.DiscoveredServer, error)
+	})
+	if !ok {
+		return "MCP caller does not support stdio restart."
+	}
+	discovered, err := restarter.RestartStdioServerWithConfig(ctx, freshServer)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	te.replaceMCPDiscovery(discovered)
+	return fmt.Sprintf("MCP stdio server %q restarted.", args.ServerName)
+}
+
+func (te *Executor) currentMCPServer(name string) (mcp.ServerConfig, error) {
+	if te.mcpConfigFile == "" {
+		return mcp.ServerConfig{}, fmt.Errorf("MCP config file is not configured")
+	}
+	cfg, _, _, err := te.currentMCPConfig()
+	if err != nil {
+		return mcp.ServerConfig{}, err
+	}
+	for _, server := range cfg.Servers {
+		if server.Name == name {
+			return server, nil
+		}
+	}
+	return mcp.ServerConfig{}, fmt.Errorf("mcp server %q is not present in current MCP config", name)
+}
+
+func (te *Executor) knownMCPServer(name string) bool {
+	for _, discovered := range te.mcpDiscovered {
+		if discovered.Server.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (te *Executor) replaceMCPDiscovery(updated mcp.DiscoveredServer) {
+	for i, discovered := range te.mcpDiscovered {
+		if discovered.Server.Name == updated.Server.Name {
+			te.mcpDiscovered[i] = updated
+			return
+		}
+	}
+	te.mcpDiscovered = append(te.mcpDiscovered, updated)
 }
 
 func (te *Executor) retireMCPCaller(caller mcp.Caller) {

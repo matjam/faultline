@@ -28,7 +28,7 @@ func TestMCPConfigUpdateRequiresRawApproval(t *testing.T) {
 	proposal := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":` + configJSON + `}`,
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), configJSON),
 		},
 	})
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -92,7 +92,7 @@ func TestMCPConfigUpdateReloadsLiveToolSurface(t *testing.T) {
 	proposal := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":` + configJSON + `}`,
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), configJSON),
 		},
 	})
 	approvalLine := approvalLineFromProposal(t, proposal)
@@ -155,7 +155,7 @@ func TestMCPConfigUpdateDefersOldCallerCloseWhileSubagentActive(t *testing.T) {
 	proposal := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":` + configJSON + `}`,
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), configJSON),
 		},
 	})
 	approvalLine := approvalLineFromProposal(t, proposal)
@@ -193,7 +193,7 @@ func TestMCPConfigUpdateRejectsHashMismatch(t *testing.T) {
 	proposal := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":` + proposedConfig + `}`,
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), proposedConfig),
 		},
 	})
 	approvalLine := approvalLineFromProposal(t, proposal)
@@ -230,9 +230,98 @@ func TestMCPConfigProposalRequiresConfigUpdatesEnabled(t *testing.T) {
 	}
 }
 
+func TestMCPReadConfigReturnsCurrentRawConfigAndHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	cfg := mcp.Config{Servers: []mcp.ServerConfig{
+		{
+			Name:       "github",
+			Transport:  "stdio",
+			Command:    "github-mcp",
+			Env:        map[string]string{"GITHUB_TOKEN": "raw-secret"},
+			AllowTools: []string{"search_repositories"},
+		},
+	}}
+	if err := mcp.SaveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{Name: "mcp_read_config"},
+	})
+
+	var result struct {
+		Config     mcp.Config `json:"config"`
+		ConfigHash string     `json:"config_hash"`
+	}
+	if err := json.Unmarshal([]byte(got), &result); err != nil {
+		t.Fatalf("mcp_read_config returned invalid JSON: %v\n%s", err, got)
+	}
+	wantHash, err := mcp.ConfigHash(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConfigHash != wantHash {
+		t.Fatalf("config_hash = %q, want %q", result.ConfigHash, wantHash)
+	}
+	if got := result.Config.Servers[0].Env["GITHUB_TOKEN"]; got != "raw-secret" {
+		t.Fatalf("env token = %q, want raw-secret", got)
+	}
+}
+
+func TestMCPConfigProposalRequiresBaseConfigHash(t *testing.T) {
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        filepath.Join(t.TempDir(), "mcp.json"),
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: `{"config":{"servers":[]}}`,
+		},
+	})
+	if !strings.Contains(got, "base_config_hash") {
+		t.Fatalf("expected base_config_hash rejection, got %q", got)
+	}
+}
+
+func TestMCPConfigProposalRejectsStaleBaseConfigHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := mcp.SaveConfig(path, mcp.Config{Servers: []mcp.ServerConfig{
+		{Name: "existing", Transport: "http", URL: "https://example.invalid/mcp"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), `{"servers":[]}`),
+		},
+	})
+	if !strings.Contains(got, "stale") {
+		t.Fatalf("expected stale base hash rejection, got %q", got)
+	}
+}
+
 func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	if err := mcp.SaveConfig(path, mcp.Config{Servers: []mcp.ServerConfig{}}); err != nil {
+	current := mcp.Config{Servers: []mcp.ServerConfig{}}
+	if err := mcp.SaveConfig(path, current); err != nil {
 		t.Fatal(err)
 	}
 	te := New(Deps{
@@ -246,7 +335,7 @@ func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	proposal := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":` + configJSON + `}`,
+			Arguments: proposalArgs(t, configHash(t, current), configJSON),
 		},
 	})
 
@@ -288,7 +377,7 @@ func TestMCPConfigProposalRejectsNoopUpdate(t *testing.T) {
 	got := te.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{
 			Name:      "mcp_propose_config_update",
-			Arguments: `{"config":{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}}`,
+			Arguments: proposalArgs(t, configHash(t, cfg), `{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}`),
 		},
 	})
 	if !strings.Contains(got, "No MCP config changes to propose.") {
@@ -331,6 +420,29 @@ func approvalIDFromLine(t *testing.T, line string) string {
 		t.Fatalf("approval line %q has %d fields, want 4", line, len(parts))
 	}
 	return parts[2]
+}
+
+func proposalArgs(t *testing.T, baseHash, configJSON string) string {
+	t.Helper()
+	baseHashJSON, err := json.Marshal(baseHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `{"base_config_hash":` + string(baseHashJSON) + `,"config":` + configJSON + `}`
+}
+
+func emptyMCPConfigHash(t *testing.T) string {
+	t.Helper()
+	return configHash(t, mcp.Config{Servers: []mcp.ServerConfig{}})
+}
+
+func configHash(t *testing.T, cfg mcp.Config) string {
+	t.Helper()
+	hash, err := mcp.ConfigHash(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
 }
 
 type closeTrackingMCPCaller struct {
