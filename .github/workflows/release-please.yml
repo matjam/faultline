@@ -46,6 +46,11 @@ jobs:
         if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          # gh release view/edit normally derive the repo from the local
+          # .git directory. The release-please job never runs
+          # actions/checkout, so .git is absent and gh fails with
+          # "fatal: not a git repository". GH_REPO bypasses that lookup.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag_name }}
         run: |
           set -euo pipefail
