@@ -194,7 +194,7 @@ func (c *HTTPClient) session(ctx context.Context, server ServerConfig) (sessionI
 		c.mu.Unlock()
 		return session, nil
 	}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
 	session, err := c.initialize(ctx, server)
 	if err != nil {
@@ -204,9 +204,7 @@ func (c *HTTPClient) session(ctx context.Context, server ServerConfig) (sessionI
 		return sessionInfo{}, err
 	}
 
-	c.mu.Lock()
 	c.sessions[server.Name] = session
-	c.mu.Unlock()
 	return session, nil
 }
 

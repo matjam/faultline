@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matjam/faultline/internal/adapters/mcp"
 	"github.com/matjam/faultline/internal/llm"
+	"github.com/matjam/faultline/internal/subagent"
 )
 
 func TestMCPConfigUpdateRequiresRawApproval(t *testing.T) {
@@ -107,12 +109,73 @@ func TestMCPConfigUpdateReloadsLiveToolSurface(t *testing.T) {
 	if !reloadCalled {
 		t.Fatal("expected successful config update to reload live MCP state")
 	}
-	if oldCaller.closed {
-		t.Fatal("old MCP caller should remain open because subagents may still share it")
+	if !oldCaller.closed {
+		t.Fatal("old MCP caller should close after reload when no subagents are active")
 	}
 	names := toolDefNames(te.ToolDefs())
 	if !names["mcp_github_search_repositories"] {
 		t.Fatal("expected reloaded allowlisted MCP tool in ToolDefs")
+	}
+}
+
+func TestMCPConfigUpdateDefersOldCallerCloseWhileSubagentActive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	approvals := mcp.NewApprovals()
+	mgr := subagent.New(
+		subagent.Config{RunTimeout: time.Hour},
+		[]subagent.Profile{{Name: subagent.DefaultProfileName}},
+		func(ctx context.Context, workID string, _ subagent.Profile, _ string, _ int) subagent.Report {
+			<-ctx.Done()
+			return subagent.Report{WorkID: workID, Canceled: true}
+		},
+		silentTestLogger(),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	workID, err := mgr.Spawn(ctx, subagent.DefaultProfileName, "hold old caller")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer func() { _ = mgr.Cancel(workID) }()
+
+	oldCaller := &closeTrackingMCPCaller{}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPCaller:            oldCaller,
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         approvals,
+		MCPReload: func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error) {
+			return &fakeMCPCaller{}, nil, nil
+		},
+		SubagentManager: mgr,
+	})
+
+	configJSON := `{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}`
+	proposal := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: `{"config":` + configJSON + `}`,
+		},
+	})
+	approvalLine := approvalLineFromProposal(t, proposal)
+	te.RecordCollaboratorMessage(approvalLine)
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_update_config",
+			Arguments: `{"approval_id":"` + approvalIDFromLine(t, approvalLine) + `","config":` + configJSON + `}`,
+		},
+	})
+	if !strings.Contains(got, "updated") {
+		t.Fatalf("expected update success, got %q", got)
+	}
+	if oldCaller.closed {
+		t.Fatal("old MCP caller should stay open while a subagent is active")
+	}
+
+	te.Close()
+	if !oldCaller.closed {
+		t.Fatal("deferred old MCP caller should close with the primary executor")
 	}
 }
 

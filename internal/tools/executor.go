@@ -1007,6 +1007,7 @@ type Executor struct {
 	mcpConfigEdit       bool
 	mcpApprovals        *mcp.Approvals
 	mcpReload           func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error)
+	retiredMCPCallers   []mcp.Caller
 	logger              *slog.Logger
 	http                *http.Client
 	cache               *WebCache // borrowed from composition root; not closed here
@@ -1158,6 +1159,7 @@ func New(deps Deps) *Executor {
 func (te *Executor) Close() {
 	if te.mode == ModePrimary {
 		closeMCPCaller(te.mcpCaller)
+		te.closeRetiredMCPCallers()
 	}
 }
 
@@ -1585,10 +1587,30 @@ func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string
 		if err != nil {
 			return fmt.Sprintf("MCP config updated on disk, but live reload failed: %s", err)
 		}
+		te.retireMCPCaller(te.mcpCaller)
 		te.mcpCaller = caller
 		te.mcpDiscovered = discovered
 	}
 	return "MCP config updated."
+}
+
+func (te *Executor) retireMCPCaller(caller mcp.Caller) {
+	if caller == nil {
+		return
+	}
+	if te.subagentMgr != nil && te.subagentMgr.ActiveCount() > 0 {
+		te.retiredMCPCallers = append(te.retiredMCPCallers, caller)
+		return
+	}
+	closeMCPCaller(caller)
+	te.closeRetiredMCPCallers()
+}
+
+func (te *Executor) closeRetiredMCPCallers() {
+	for _, caller := range te.retiredMCPCallers {
+		closeMCPCaller(caller)
+	}
+	te.retiredMCPCallers = nil
 }
 
 func closeMCPCaller(caller mcp.Caller) {

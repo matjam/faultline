@@ -42,6 +42,49 @@ func TestToolDefsExposeOnlyAllowlistedTools(t *testing.T) {
 	}
 }
 
+func TestToolDefsSkipUnsafeOrReservedGeneratedNames(t *testing.T) {
+	discovered := []DiscoveredServer{
+		{
+			Server: ServerConfig{
+				Name:       "github",
+				Transport:  "stdio",
+				Command:    "github-mcp",
+				AllowTools: []string{"valid_tool", "bad.tool"},
+			},
+			Tools: []DiscoveredTool{
+				{Name: "valid_tool"},
+				{Name: "bad.tool"},
+			},
+		},
+		{
+			Server: ServerConfig{
+				Name:       "list",
+				Transport:  "stdio",
+				Command:    "list-mcp",
+				AllowTools: []string{"servers"},
+			},
+			Tools: []DiscoveredTool{
+				{Name: "servers"},
+			},
+		},
+	}
+
+	defs := ToolDefs(discovered)
+
+	if len(defs) != 1 {
+		t.Fatalf("len(ToolDefs) = %d, want 1", len(defs))
+	}
+	if defs[0].Function == nil || defs[0].Function.Name != "mcp_github_valid_tool" {
+		t.Fatalf("unexpected tool definition: %#v", defs[0].Function)
+	}
+	if _, ok := ResolveToolName(discovered, "mcp_github_bad.tool"); ok {
+		t.Fatal("expected invalid generated tool name not to resolve")
+	}
+	if _, ok := ResolveToolName(discovered, "mcp_list_servers"); ok {
+		t.Fatal("expected reserved management tool name not to resolve")
+	}
+}
+
 func TestDiscoveredServerStatusIncludesUnallowlistedTools(t *testing.T) {
 	discovered := DiscoveredServer{
 		Server: ServerConfig{

@@ -22,6 +22,18 @@ func TestServerConfigValidateRequiresAllowlistOnly(t *testing.T) {
 	}
 }
 
+func TestServerConfigValidateRejectsUnsafeServerName(t *testing.T) {
+	cfg := ServerConfig{
+		Name:      "github.com/org",
+		Transport: "http",
+		URL:       "https://example.invalid/mcp",
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unsafe server name to be rejected")
+	}
+}
+
 func TestServerConfigMissingAllowToolsAllowsNoTools(t *testing.T) {
 	cfg := ServerConfig{
 		Name:      "github",

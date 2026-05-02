@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestHTTPClientDiscoverSendsToolsListRequest(t *testing.T) {
@@ -299,6 +302,59 @@ func TestHTTPClientReusesStreamableHTTPSession(t *testing.T) {
 	want := []string{"initialize", "notifications/initialized", "tools/call", "tools/call"}
 	if strings.Join(methods, ",") != strings.Join(want, ",") {
 		t.Fatalf("methods = %v, want %v", methods, want)
+	}
+}
+
+func TestHTTPClientSerializesConcurrentSessionInitialization(t *testing.T) {
+	var initializeCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		switch req.Method {
+		case "initialize":
+			initializeCount.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			w.Header().Set("Mcp-Session-Id", "session-123")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			if got := r.Header.Get("Mcp-Session-Id"); got != "session-123" {
+				t.Fatalf("Mcp-Session-Id = %q, want session-123", got)
+			}
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"ok"}]}}`, req.ID)
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient([]ServerConfig{
+		{Name: "github", Transport: "http", URL: server.URL},
+	}, server.Client())
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := client.CallTool(context.Background(), "github", "search_repositories", json.RawMessage(`{"query":"faultline"}`))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+	if got := initializeCount.Load(); got != 1 {
+		t.Fatalf("initializeCount = %d, want 1", got)
 	}
 }
 

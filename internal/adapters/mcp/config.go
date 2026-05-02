@@ -131,6 +131,9 @@ func (c ServerConfig) Validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+	if !validServerName(c.Name) {
+		return fmt.Errorf("name %q must contain only letters, digits, and hyphens", c.Name)
+	}
 	if len(c.DenyTools) > 0 {
 		return fmt.Errorf("deny_tools is not supported; use allow_tools only")
 	}
@@ -223,15 +226,24 @@ func (c ServerConfig) runtimeNotes() []string {
 // visible through discovery/status output but are not callable.
 func ToolDefs(discovered []DiscoveredServer) []llm.Tool {
 	var defs []llm.Tool
+	seen := make(map[string]struct{})
 	for _, server := range discovered {
 		for _, tool := range server.Tools {
 			if !server.Server.AllowedTool(tool.Name) {
 				continue
 			}
+			name := toolDefName(server.Server.Name, tool.Name)
+			if !validToolDefName(name) || reservedMCPToolName(name) {
+				continue
+			}
+			if _, exists := seen[name]; exists {
+				continue
+			}
+			seen[name] = struct{}{}
 			defs = append(defs, llm.Tool{
 				Type: llm.ToolTypeFunction,
 				Function: &llm.FunctionDef{
-					Name:        toolDefName(server.Server.Name, tool.Name),
+					Name:        name,
 					Description: tool.Description,
 					Parameters:  tool.InputSchema,
 				},
@@ -250,7 +262,11 @@ func ResolveToolName(discovered []DiscoveredServer, name string) (ResolvedTool, 
 			if !server.Server.AllowedTool(tool.Name) {
 				continue
 			}
-			if toolDefName(server.Server.Name, tool.Name) == name {
+			generated := toolDefName(server.Server.Name, tool.Name)
+			if !validToolDefName(generated) || reservedMCPToolName(generated) {
+				continue
+			}
+			if generated == name {
 				return ResolvedTool{
 					ServerName: server.Server.Name,
 					ToolName:   tool.Name,
@@ -263,6 +279,47 @@ func ResolveToolName(discovered []DiscoveredServer, name string) (ResolvedTool, 
 
 func toolDefName(serverName, toolName string) string {
 	return "mcp_" + serverName + "_" + toolName
+}
+
+func validServerName(name string) bool {
+	if name == "" || len(name) > 40 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validToolDefName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func reservedMCPToolName(name string) bool {
+	switch name {
+	case "mcp_list_servers", "mcp_discover_tools", "mcp_propose_config_update", "mcp_update_config":
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadConfig reads and validates a dedicated MCP JSON config file.
