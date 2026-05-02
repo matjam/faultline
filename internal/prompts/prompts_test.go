@@ -183,6 +183,9 @@ func TestDefaultSystemPromptIncludesMCPGuidance(t *testing.T) {
 		"npm install --prefix /node",
 		"/node/node_modules/.bin",
 		"git-diff-style Markdown code block",
+		"mcp_read_config",
+		"base_config_hash",
+		"mcp_restart_stdio_server",
 	} {
 		if !strings.Contains(defaultSystem, want) {
 			t.Fatalf("default system prompt missing %q", want)

@@ -89,6 +89,17 @@ func (c *StdioClient) Close() error {
 	return firstErr
 }
 
+// Restart closes one server's live session, then re-runs discovery to start a
+// fresh process with the current server configuration.
+func (c *StdioClient) Restart(ctx context.Context, serverName string) (DiscoveredServer, error) {
+	server, err := c.server(serverName)
+	if err != nil {
+		return DiscoveredServer{}, err
+	}
+	c.closeSession(serverName)
+	return c.Discover(ctx, server.Name)
+}
+
 // Discover runs tools/list for one configured stdio server.
 func (c *StdioClient) Discover(ctx context.Context, serverName string) (DiscoveredServer, error) {
 	server, err := c.server(serverName)
@@ -217,6 +228,16 @@ func (c *StdioClient) dropSession(name string, session *stdioSession) {
 	}
 	c.mu.Unlock()
 	_ = session.Close()
+}
+
+func (c *StdioClient) closeSession(name string) {
+	c.mu.Lock()
+	session := c.sessions[name]
+	delete(c.sessions, name)
+	c.mu.Unlock()
+	if session != nil {
+		_ = session.Close()
+	}
 }
 
 type stdioRequest struct {

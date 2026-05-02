@@ -102,6 +102,30 @@ func TestStdioClientClosesIdleSession(t *testing.T) {
 	}
 }
 
+func TestStdioClientRestartClosesNamedSessionAndRediscoverStartsFresh(t *testing.T) {
+	runner := &restartableStdioRunner{}
+	client := NewStdioClient(
+		[]ServerConfig{helperStdioServerConfig(t, "tools/list")},
+		runner,
+		time.Minute,
+	)
+	defer client.Close()
+
+	if _, err := client.Discover(context.Background(), "local"); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if _, err := client.Restart(context.Background(), "local"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	if got := runner.starts.Load(); got != 2 {
+		t.Fatalf("runner starts = %d, want 2", got)
+	}
+	if got := runner.closed.Load(); got != 1 {
+		t.Fatalf("closed sessions = %d, want 1", got)
+	}
+}
+
 func TestStdioClientIncludesStderrWhenResponseEOF(t *testing.T) {
 	client := NewStdioClient(
 		[]ServerConfig{helperStdioServerConfig(t, "tools/list")},
@@ -365,6 +389,54 @@ func (p *statefulStdioProcess) Wait() error {
 		p.closed.Add(1)
 	})
 	return p.waitError
+}
+
+type restartableStdioRunner struct {
+	starts atomic.Int32
+	closed atomic.Int32
+}
+
+func (r *restartableStdioRunner) Start(ctx context.Context, cmd StdioCommand) (StdioProcess, error) {
+	r.starts.Add(1)
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	proc := &statefulStdioProcess{
+		stdin:  stdinWriter,
+		stdout: stdoutReader,
+		stderr: strings.NewReader(""),
+		done:   make(chan error, 1),
+		closed: &r.closed,
+	}
+
+	go func() {
+		defer stdoutWriter.Close()
+		defer stdinReader.Close()
+		scanner := bufio.NewScanner(stdinReader)
+		for scanner.Scan() {
+			var req jsonRPCRequest
+			if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+				proc.done <- err
+				return
+			}
+			switch req.Method {
+			case "initialize":
+				_, _ = stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}` + "\n"))
+			case "notifications/initialized":
+			case "tools/list":
+				_, _ = stdoutWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"local_search","description":"Search locally."}]}}` + "\n"))
+			default:
+				proc.done <- &unexpectedMethodError{method: req.Method}
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			proc.done <- err
+			return
+		}
+		proc.done <- nil
+	}()
+
+	return proc, nil
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {

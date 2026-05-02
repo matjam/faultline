@@ -238,6 +238,83 @@ func TestSubagentExecuteRejectsMCPManagementTools(t *testing.T) {
 	}
 }
 
+func TestExecuteMCPRestartStdioServerUpdatesDiscovery(t *testing.T) {
+	caller := &fakeRestartMCPCaller{
+		discovered: mcp.DiscoveredServer{
+			Server: mcp.ServerConfig{
+				Name:       "local",
+				Transport:  "stdio",
+				Command:    "local-mcp",
+				AllowTools: []string{"new_search"},
+			},
+			Tools: []mcp.DiscoveredTool{{Name: "new_search"}},
+		},
+	}
+	te := New(Deps{
+		Logger:    silentTestLogger(),
+		MCPCaller: caller,
+		MCPDiscovered: []mcp.DiscoveredServer{
+			{
+				Server: mcp.ServerConfig{
+					Name:       "local",
+					Transport:  "stdio",
+					Command:    "local-mcp",
+					AllowTools: []string{"old_search"},
+				},
+				Tools: []mcp.DiscoveredTool{{Name: "old_search"}},
+			},
+		},
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_restart_stdio_server",
+			Arguments: `{"server_name":"local"}`,
+		},
+	})
+
+	if !strings.Contains(got, "restarted") {
+		t.Fatalf("expected restart success, got %q", got)
+	}
+	if caller.serverName != "local" {
+		t.Fatalf("serverName = %q, want local", caller.serverName)
+	}
+	names := toolDefNames(te.ToolDefs())
+	if !names["mcp_local_new_search"] {
+		t.Fatal("expected restarted discovery to update ToolDefs")
+	}
+	if names["mcp_local_old_search"] {
+		t.Fatal("expected old discovered tool to be replaced")
+	}
+}
+
+func TestExecuteMCPRestartStdioServerRejectsHTTPServer(t *testing.T) {
+	te := New(Deps{
+		Logger:    silentTestLogger(),
+		MCPCaller: &fakeRestartMCPCaller{},
+		MCPDiscovered: []mcp.DiscoveredServer{
+			{
+				Server: mcp.ServerConfig{
+					Name:      "remote",
+					Transport: "http",
+					URL:       "https://example.invalid/mcp",
+				},
+			},
+		},
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_restart_stdio_server",
+			Arguments: `{"server_name":"remote"}`,
+		},
+	})
+
+	if !strings.Contains(got, "not a stdio server") {
+		t.Fatalf("expected http rejection, got %q", got)
+	}
+}
+
 func toolDefNames(defs []llm.Tool) map[string]bool {
 	names := make(map[string]bool, len(defs))
 	for _, def := range defs {
@@ -281,4 +358,18 @@ func (f *fakeMCPCaller) CallTool(_ context.Context, serverName, toolName string,
 	f.toolName = toolName
 	f.args = append(json.RawMessage(nil), args...)
 	return f.result, nil
+}
+
+type fakeRestartMCPCaller struct {
+	discovered mcp.DiscoveredServer
+	serverName string
+}
+
+func (f *fakeRestartMCPCaller) CallTool(context.Context, string, string, json.RawMessage) (string, error) {
+	return "", nil
+}
+
+func (f *fakeRestartMCPCaller) RestartStdioServer(_ context.Context, serverName string) (mcp.DiscoveredServer, error) {
+	f.serverName = serverName
+	return f.discovered, nil
 }
