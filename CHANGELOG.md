@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/matjam/faultline/compare/v1.6.0...v1.7.0) (2026-05-02)
+
+
+### Features
+
+* **mcp:** support sandboxed and streamable servers ([#35](https://github.com/matjam/faultline/issues/35)) ([5350f78](https://github.com/matjam/faultline/commit/5350f7848306f45e5197e9b7eb325ff5a75d78b5))
+
+
+### Bug Fixes
+
+* **ci:** set GH_REPO so gh release commands skip git detection ([7ebc3e5](https://github.com/matjam/faultline/commit/7ebc3e5843ca4e87028addc74db9f1c723faea94))
+* **ci:** set GH_REPO so release-notes step works without checkout ([#38](https://github.com/matjam/faultline/issues/38)) ([7ebc3e5](https://github.com/matjam/faultline/commit/7ebc3e5843ca4e87028addc74db9f1c723faea94))
+
 ## [1.6.0](https://github.com/matjam/faultline/compare/v1.5.0...v1.6.0) (2026-05-01)
 
 
