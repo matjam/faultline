@@ -627,7 +627,6 @@ func (s *Sandbox) dockerRun(ctx context.Context, needsNetwork bool, command ...s
 type MCPStdioProcess struct {
 	cmd           *exec.Cmd
 	containerName string
-	timeout       time.Duration
 	cancel        context.CancelFunc
 	stdin         io.WriteCloser
 	stdout        io.Reader
@@ -679,7 +678,6 @@ func (s *Sandbox) StartStdio(ctx context.Context, name, command string, args []s
 	return &MCPStdioProcess{
 		cmd:           cmd,
 		containerName: containerName,
-		timeout:       s.timeout,
 		cancel:        cancel,
 		stdin:         stdin,
 		stdout:        stdout,

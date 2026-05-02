@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,8 +63,10 @@ func TestMCPConfigUpdateReloadsLiveToolSurface(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	approvals := mcp.NewApprovals()
 	reloadCalled := false
+	oldCaller := &closeTrackingMCPCaller{}
 	te := New(Deps{
 		Logger:               silentTestLogger(),
+		MCPCaller:            oldCaller,
 		MCPConfigFile:        path,
 		MCPConfigEditEnabled: true,
 		MCPApprovals:         approvals,
@@ -103,6 +106,9 @@ func TestMCPConfigUpdateReloadsLiveToolSurface(t *testing.T) {
 	}
 	if !reloadCalled {
 		t.Fatal("expected successful config update to reload live MCP state")
+	}
+	if oldCaller.closed {
+		t.Fatal("old MCP caller should remain open because subagents may still share it")
 	}
 	names := toolDefNames(te.ToolDefs())
 	if !names["mcp_github_search_repositories"] {
@@ -165,6 +171,7 @@ func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	})
 
 	for _, want := range []string{
+		"config_hash: ",
 		"```diff\n",
 		"diff --git a/mcp.json b/mcp.json",
 		"--- a/mcp.json",
@@ -177,6 +184,9 @@ func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 		if !strings.Contains(proposal, want) {
 			t.Fatalf("proposal diff missing %q:\n%s", want, proposal)
 		}
+	}
+	if strings.Contains(proposal, "diff_hash:") {
+		t.Fatalf("proposal should label approval hash as config_hash, got:\n%s", proposal)
 	}
 }
 
@@ -212,4 +222,17 @@ func approvalIDFromLine(t *testing.T, line string) string {
 		t.Fatalf("approval line %q has %d fields, want 4", line, len(parts))
 	}
 	return parts[2]
+}
+
+type closeTrackingMCPCaller struct {
+	closed bool
+}
+
+func (c *closeTrackingMCPCaller) CallTool(context.Context, string, string, json.RawMessage) (string, error) {
+	return "", nil
+}
+
+func (c *closeTrackingMCPCaller) Close() error {
+	c.closed = true
+	return nil
 }

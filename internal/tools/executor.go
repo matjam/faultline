@@ -6,7 +6,6 @@ package tools
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1148,12 +1147,6 @@ func New(deps Deps) *Executor {
 		observer:            deps.Observer,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					MinVersion:         tls.VersionTLS13,
-					InsecureSkipVerify: false,
-				},
-			},
 		},
 	}
 }
@@ -1484,7 +1477,7 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\ndiff_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nAsk the collaborator to reply exactly with:\n%s", id, hash, diff, approvalText)
+	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\nconfig_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nAsk the collaborator to reply exactly with:\n%s", id, hash, diff, approvalText)
 }
 
 func (te *Executor) mcpConfigDiff(proposed mcp.Config) (string, error) {
@@ -1589,7 +1582,6 @@ func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string
 		if err != nil {
 			return fmt.Sprintf("MCP config updated on disk, but live reload failed: %s", err)
 		}
-		closeMCPCaller(te.mcpCaller)
 		te.mcpCaller = caller
 		te.mcpDiscovered = discovered
 	}
