@@ -150,6 +150,23 @@ func TestMCPConfigUpdateRejectsHashMismatch(t *testing.T) {
 	}
 }
 
+func TestMCPConfigProposalRequiresConfigUpdatesEnabled(t *testing.T) {
+	te := New(Deps{
+		Logger:       silentTestLogger(),
+		MCPApprovals: mcp.NewApprovals(),
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: `{"config":{"servers":[]}}`,
+		},
+	})
+	if !strings.Contains(got, "not configured") {
+		t.Fatalf("expected not configured error, got %q", got)
+	}
+}
+
 func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	if err := mcp.SaveConfig(path, mcp.Config{Servers: []mcp.ServerConfig{}}); err != nil {
@@ -187,6 +204,35 @@ func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	}
 	if strings.Contains(proposal, "diff_hash:") {
 		t.Fatalf("proposal should label approval hash as config_hash, got:\n%s", proposal)
+	}
+}
+
+func TestMCPConfigProposalRejectsNoopUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	cfg := mcp.Config{Servers: []mcp.ServerConfig{
+		{Name: "github", Transport: "http", URL: "https://example.invalid/mcp", AllowTools: []string{"search_repositories"}},
+	}}
+	if err := mcp.SaveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: `{"config":{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}}`,
+		},
+	})
+	if !strings.Contains(got, "No MCP config changes to propose.") {
+		t.Fatalf("expected no-op rejection, got:\n%s", got)
+	}
+	if strings.Contains(got, "APPROVE MCP ") {
+		t.Fatalf("no-op proposal should not create approval, got:\n%s", got)
 	}
 }
 

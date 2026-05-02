@@ -1462,8 +1462,8 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return fmt.Sprintf("Error parsing arguments: %s", err)
 	}
-	if te.mcpApprovals == nil {
-		return "MCP config approvals are not configured."
+	if !te.mcpConfigEdit || te.mcpConfigFile == "" || te.mcpApprovals == nil {
+		return "MCP config updates are not configured."
 	}
 	if err := args.Config.Validate(); err != nil {
 		return fmt.Sprintf("Error: %s", err)
@@ -1471,6 +1471,9 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	diff, err := te.mcpConfigDiff(args.Config)
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
+	}
+	if diff == "" {
+		return "No MCP config changes to propose."
 	}
 
 	id, hash, approvalText, err := te.mcpApprovals.Propose(args.Config)
@@ -1522,7 +1525,7 @@ func fullFileUnifiedDiff(path, current, proposed string) string {
 		path = "mcp.json"
 	}
 	if current == proposed {
-		return fmt.Sprintf("diff --git a/%s b/%s\n", path, path)
+		return ""
 	}
 
 	currentLines := splitDiffLines(current)

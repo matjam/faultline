@@ -219,6 +219,41 @@ data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"stream
 	}
 }
 
+func TestHTTPClientParsesLargeStreamableHTTPSSEDataLine(t *testing.T) {
+	largeText := strings.Repeat("x", 1024*1024+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "session-123")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":%q}]}}\n\n", largeText)
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient([]ServerConfig{
+		{Name: "github", Transport: "http", URL: server.URL},
+	}, server.Client())
+
+	result, err := client.CallTool(context.Background(), "github", "search_repositories", json.RawMessage(`{"query":"faultline"}`))
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result != largeText {
+		t.Fatalf("result length = %d, want %d", len(result), len(largeText))
+	}
+}
+
 func TestHTTPClientReusesStreamableHTTPSession(t *testing.T) {
 	var methods []string
 	var callCount int

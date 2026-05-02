@@ -291,7 +291,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		return err
 	}
 
-	var toolDefs []llm.Tool
+	toolDefs := a.tools.ToolDefs()
 
 	// Derive a context for tool execution that cancels on either parent
 	// ctx done OR graceful-shutdown signal. The single bridge goroutine

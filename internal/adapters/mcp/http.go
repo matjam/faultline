@@ -373,25 +373,29 @@ func parseJSONRPCResponse(data []byte, id int) (json.RawMessage, error) {
 }
 
 func readSSEResponse(body io.Reader, id int) (json.RawMessage, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReader(body)
 	var dataLines []string
-	for scanner.Scan() {
-		line := strings.TrimSuffix(scanner.Text(), "\r")
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && len(line) == 0 {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read mcp sse response: %w", err)
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if line == "" {
 			result, done, err := parseSSEEventData(dataLines, id)
 			if err != nil || done {
 				return result, err
 			}
 			dataLines = nil
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
+		} else if strings.HasPrefix(line, "data:") {
 			dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read mcp sse response: %w", err)
+		if err == io.EOF {
+			break
+		}
 	}
 	if len(dataLines) > 0 {
 		result, done, err := parseSSEEventData(dataLines, id)
