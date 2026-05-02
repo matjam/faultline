@@ -370,6 +370,11 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 			return nil
 		}
 
+		// Refresh tool definitions each turn so collaborator-approved
+		// runtime capability changes (for example MCP allowlist edits)
+		// are visible without restarting the agent.
+		toolDefs = a.tools.ToolDefs()
+
 		// Check for shutdown
 		select {
 		case <-ctx.Done():
@@ -901,7 +906,14 @@ func (a *Agent) injectPendingMessages(messages []llm.Message) ([]llm.Message, bo
 // injector and the post-response handler when messages arrive during
 // generation.
 func (a *Agent) appendCollaboratorMessages(messages []llm.Message, pending []string) []llm.Message {
+	type rawCollaboratorRecorder interface {
+		RecordCollaboratorMessage(text string)
+	}
+	recorder, _ := a.tools.(rawCollaboratorRecorder)
 	for _, text := range pending {
+		if recorder != nil {
+			recorder.RecordCollaboratorMessage(text)
+		}
 		a.logger.Info("injecting collaborator message into conversation", "text", text)
 		messages = append(messages, llm.Message{
 			Role: llm.RoleUser,

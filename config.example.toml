@@ -120,8 +120,8 @@ enabled = false
 # the sandbox-image GitHub Actions workflow.
 image = "ghcr.io/matjam/faultline-sandbox:latest"
 
-# Sandbox working directory on the host. Mapped into the container as the
-# script's CWD. Three subdirs are auto-created: scripts/, input/, output/.
+# Sandbox working directory on the host. Subdirs are auto-created for scripts/,
+# input/, output/, venv/ (Python), node/ (Node), mcp/ (stdio MCP), and cache/.
 dir = "./sandbox"
 
 # Per-operation timeout. Includes container start, script execution, and
@@ -198,6 +198,31 @@ allow_prerelease = false
 # really only need to set this if running under unusual launchers that
 # break os.Executable().
 binary_path = ""
+
+# ---------------------------------------------------------------------------
+# [mcp] — optional Model Context Protocol tool support.
+#
+# MCP servers live in a dedicated JSON config file so collaborator-approved
+# updates can adjust tool access without rewriting this main config. MCP tools
+# are default-disabled: a server may be discovered, but an ordinary MCP tool is
+# callable only when its exact MCP tool name appears in that server's
+# allow_tools list. There is no deny_tools or allow-all mode.
+#
+# HTTP MCP servers call their configured URL directly. Stdio MCP servers always
+# run inside the sandbox container with the same mounts as sandbox_shell. Put
+# local stdio server files under sandbox/mcp/<server> and use container paths
+# such as /mcp/example/server.js in mcp.json.
+# Node-based stdio MCP packages can be installed with sandbox_shell using
+# `npm install --prefix /node <package>`; their bin scripts are available in
+# MCP config under /node/node_modules/.bin/.
+# Stdio MCP inherits the sandbox network setting; set [sandbox].network = true
+# when a stdio server legitimately needs outbound access.
+# ---------------------------------------------------------------------------
+[mcp]
+enabled = false
+config_file = "./mcp.json"
+allow_agent_edit_config = false
+stdio_idle_timeout = "10m"
 
 # ---------------------------------------------------------------------------
 # [limits] — content-size caps for LLM-facing surfaces.

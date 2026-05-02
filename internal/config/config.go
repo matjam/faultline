@@ -20,6 +20,10 @@ type Config struct {
 	Limits   LimitsConfig   `toml:"limits"`
 	Update   UpdateConfig   `toml:"update"`
 
+	// MCP is optional; when Enabled, Faultline reads a dedicated MCP
+	// server config file and exposes only explicitly allowlisted tools.
+	MCP MCPConfig `toml:"mcp"`
+
 	// Embeddings is optional; when Enabled, semantic search is added
 	// alongside BM25 in memory_search and memory mutations re-embed
 	// the affected file synchronously.
@@ -194,6 +198,25 @@ type UpdateConfig struct {
 	// updater swaps this file in place. Empty falls back to
 	// os.Executable() at startup.
 	BinaryPath string `toml:"binary_path"`
+}
+
+// MCPConfig holds settings for Model Context Protocol tool support.
+// Server definitions live in ConfigFile so the collaborator-gated update
+// flow can edit them without rewriting the main TOML config.
+type MCPConfig struct {
+	Enabled bool `toml:"enabled"`
+
+	// ConfigFile points to the dedicated MCP server config file.
+	// Defaults to "./mcp.json".
+	ConfigFile string `toml:"config_file"`
+
+	// AllowAgentEditConfig gates the MCP config-update tools. Even when
+	// true, writes still require raw collaborator approval.
+	AllowAgentEditConfig bool `toml:"allow_agent_edit_config"`
+
+	// StdioIdleTimeout closes long-lived stdio MCP containers after
+	// inactivity. Defaults to 10m.
+	StdioIdleTimeout duration `toml:"stdio_idle_timeout"`
 }
 
 // EmbeddingsConfig holds optional semantic-search settings. When
@@ -494,6 +517,11 @@ func Default() *Config {
 			GitHubRepo:    "matjam/faultline",
 			RestartMode:   "exit",
 		},
+		MCP: MCPConfig{
+			Enabled:          false,
+			ConfigFile:       "./mcp.json",
+			StdioIdleTimeout: duration(10 * time.Minute),
+		},
 		Embeddings: EmbeddingsConfig{
 			Enabled:   false,
 			URL:       "https://api.openai.com/v1",
@@ -547,6 +575,13 @@ func Load(path string) (*Config, error) {
 	// set update.enabled = false.
 	if cfg.Update.CheckInterval.Duration() <= 0 {
 		cfg.Update.CheckInterval = duration(1 * time.Hour)
+	}
+
+	if cfg.MCP.ConfigFile == "" {
+		cfg.MCP.ConfigFile = "./mcp.json"
+	}
+	if cfg.MCP.StdioIdleTimeout.Duration() <= 0 {
+		cfg.MCP.StdioIdleTimeout = duration(10 * time.Minute)
 	}
 
 	// Embeddings: backfill defaults when the operator enables the

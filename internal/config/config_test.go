@@ -80,6 +80,69 @@ sandbox_output_chars = 100000
 	}
 }
 
+func TestLoadConfig_MCPDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[api]
+url = "http://example.com/v1"
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.MCP.Enabled {
+		t.Error("MCP.Enabled should default false")
+	}
+	if cfg.MCP.ConfigFile != "./mcp.json" {
+		t.Errorf("MCP.ConfigFile = %q, want ./mcp.json", cfg.MCP.ConfigFile)
+	}
+	if cfg.MCP.AllowAgentEditConfig {
+		t.Error("MCP.AllowAgentEditConfig should default false")
+	}
+	if got, want := cfg.MCP.StdioIdleTimeout.Duration(), 10*time.Minute; got != want {
+		t.Errorf("MCP.StdioIdleTimeout = %v, want %v", got, want)
+	}
+}
+
+func TestLoadConfig_MCPOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[mcp]
+enabled = true
+config_file = "./custom-mcp.json"
+allow_agent_edit_config = true
+stdio_idle_timeout = "30s"
+`
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !cfg.MCP.Enabled {
+		t.Error("MCP.Enabled should be true")
+	}
+	if cfg.MCP.ConfigFile != "./custom-mcp.json" {
+		t.Errorf("MCP.ConfigFile = %q, want ./custom-mcp.json", cfg.MCP.ConfigFile)
+	}
+	if !cfg.MCP.AllowAgentEditConfig {
+		t.Error("MCP.AllowAgentEditConfig should be true")
+	}
+	if got, want := cfg.MCP.StdioIdleTimeout.Duration(), 30*time.Second; got != want {
+		t.Errorf("MCP.StdioIdleTimeout = %v, want %v", got, want)
+	}
+}
+
 func TestLoadConfig_DurationParsing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
