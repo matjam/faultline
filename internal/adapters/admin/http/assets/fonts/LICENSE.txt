@@ -1,0 +1,18 @@
+VT323 and Share Tech Mono are licensed under the SIL Open Font License,
+Version 1.1.
+
+  https://scripts.sil.org/OFL
+
+Designers / Authors:
+  - VT323 — Peter Hull
+    https://fonts.google.com/specimen/VT323
+
+  - Share Tech Mono — Carrois Type Design
+    https://fonts.google.com/specimen/Share+Tech+Mono
+
+Both fonts were converted from upstream TTF (downloaded from
+fonts.gstatic.com) to WOFF2 with fontTools to keep the binary footprint
+small (~46 KB combined). No glyph subsetting; full character set
+preserved.
+
+Copyright (c) the respective authors as recorded in the font name table.
