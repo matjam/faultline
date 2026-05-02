@@ -518,6 +518,168 @@ func TestServer_Logout_RejectsBadCSRF(t *testing.T) {
 	}
 }
 
+// TestServer_LoginGet_CSRFCookieStable is the regression guard for
+// the cookie-rotation race: two consecutive GETs of /admin/login —
+// modeling a user opening the page and then a stale fragment poll
+// re-fetching it via XHR — must return the *same* login-CSRF cookie
+// value. Otherwise a form rendered before the second GET would carry
+// an _csrf field that no longer matches the cookie in the jar, and
+// the user's login POST would 403.
+func TestServer_LoginGet_CSRFCookieStable(t *testing.T) {
+	ts := newTestServer(t)
+	jar := newJar(t)
+	client := noFollowClient(jar)
+
+	resp, err := client.Get(ts.srv.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET 1: %v", err)
+	}
+	resp.Body.Close()
+	first := loginCSRFFromJar(t, jar, ts.srv.URL)
+
+	resp, err = client.Get(ts.srv.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET 2: %v", err)
+	}
+	resp.Body.Close()
+	second := loginCSRFFromJar(t, jar, ts.srv.URL)
+
+	if first == "" {
+		t.Fatal("first GET did not set faultline_login_csrf cookie")
+	}
+	if first != second {
+		t.Fatalf("login csrf cookie rotated between renders: %q -> %q", first, second)
+	}
+}
+
+// TestServer_LoginPost_SurvivesIntermediateRender models the original
+// bug end-to-end: render the form (collect _csrf token A), perform a
+// second GET to simulate a stale fragment-polling browser, then POST
+// the *original* form. Must succeed.
+func TestServer_LoginPost_SurvivesIntermediateRender(t *testing.T) {
+	ts := newTestServer(t)
+	jar := newJar(t)
+	client := noFollowClient(jar)
+
+	resp, err := client.Get(ts.srv.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET form: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	csrf := extractFormCSRF(string(body))
+	if csrf == "" {
+		t.Fatal("no _csrf in form")
+	}
+
+	// Stale background poll: same client, same jar, second GET.
+	// Pre-fix this rotated the cookie and would have invalidated csrf.
+	resp, err = client.Get(ts.srv.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET poll: %v", err)
+	}
+	resp.Body.Close()
+
+	// POST with the originally-rendered _csrf.
+	resp, err = client.PostForm(ts.srv.URL+"/admin/login", url.Values{
+		"username": {"admin"},
+		"password": {ts.password},
+		"_csrf":    {csrf},
+	})
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303 (cookie/form mismatch regression)", resp.StatusCode)
+	}
+}
+
+// TestServer_RequireAuth_HTMX_GET_HXRedirect verifies that an HTMX
+// XHR for a protected fragment without a session receives a 401 with
+// an HX-Redirect header instead of a 303 to /admin/login. Without
+// this, stale fragment polling silently re-fetches the login page in
+// the background — wasteful, log-spammy, and (until the cookie
+// stability fix) racy with any in-flight login form.
+func TestServer_RequireAuth_HTMX_GET_HXRedirect(t *testing.T) {
+	ts := newTestServer(t)
+	client := noFollowClient(newJar(t))
+
+	req, err := http.NewRequest(http.MethodGet, ts.srv.URL+"/admin/fragments/status", nil)
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET fragment: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	hx := resp.Header.Get("HX-Redirect")
+	if hx == "" {
+		t.Fatal("missing HX-Redirect header")
+	}
+	if !strings.HasPrefix(hx, "/admin/login") {
+		t.Fatalf("HX-Redirect = %q, want /admin/login...", hx)
+	}
+	// The next= parameter should preserve the original GET path so
+	// the operator lands back where they started after sign-in.
+	if !strings.Contains(hx, "next=") {
+		t.Fatalf("HX-Redirect missing next param: %q", hx)
+	}
+}
+
+// TestServer_RequireAuth_HTMX_POST_HXRedirect covers the non-GET
+// HTMX case: protected POSTs without a session get 401 + HX-Redirect
+// pointing at the bare login page (no `next` for state-changing
+// requests; we don't replay them).
+func TestServer_RequireAuth_HTMX_POST_HXRedirect(t *testing.T) {
+	ts := newTestServer(t)
+	client := noFollowClient(newJar(t))
+
+	req, err := http.NewRequest(http.MethodPost, ts.srv.URL+"/admin/skills/toggle", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	hx := resp.Header.Get("HX-Redirect")
+	if hx != "/admin/login" {
+		t.Fatalf("HX-Redirect = %q, want /admin/login (no next for non-GET)", hx)
+	}
+}
+
+// loginCSRFFromJar returns the current value of the
+// faultline_login_csrf cookie in jar for the test server's host.
+func loginCSRFFromJar(t *testing.T, jar http.CookieJar, baseURL string) string {
+	t.Helper()
+	u, err := url.Parse(baseURL + "/admin/login")
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	for _, c := range jar.Cookies(u) {
+		if c.Name == "faultline_login_csrf" {
+			return c.Value
+		}
+	}
+	return ""
+}
+
 func TestServer_StaticAssetsServe(t *testing.T) {
 	ts := newTestServer(t)
 	for _, path := range []string{
