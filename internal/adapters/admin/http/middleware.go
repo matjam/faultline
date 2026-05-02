@@ -40,15 +40,30 @@ func sessionFromContext(ctx context.Context) *users.Session {
 // requireAuth wraps a handler so it only fires for authenticated
 // requests. Unauthenticated callers are redirected to /admin/login
 // (preserving their target via the `next` query parameter when the
-// method is GET) or rejected with 403 for non-GET. State-changing
+// method is GET) or rejected with 401 for non-GET. State-changing
 // methods additionally have their CSRF token validated.
+//
+// HTMX requests (header `HX-Request: true`) get an HX-Redirect
+// response instead of a 303 to /admin/login. HTMX honors
+// HX-Redirect on any response and triggers a full-page navigation
+// client-side. This avoids a subtle race: stale fragment polling
+// from a tab whose session expired would otherwise XHR-follow the
+// 303 to /admin/login, and the login GET handler would be invoked
+// in the background — visible in the access log and (historically)
+// rotating the login-CSRF cookie out from under any login form the
+// user had open. The HX-Redirect path keeps polling redirects from
+// touching the login page at all.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := s.currentSession(r)
 		if sess == nil {
-			if r.Method == http.MethodGet {
+			switch {
+			case isHTMXRequest(r):
+				w.Header().Set("HX-Redirect", htmxLoginTarget(r))
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			case r.Method == http.MethodGet:
 				redirectToLogin(w, r)
-			} else {
+			default:
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 			}
 			return
@@ -113,6 +128,25 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
+// isHTMXRequest reports whether the caller is HTMX (or a stand-in
+// that mirrors its convention). HTMX sets `HX-Request: true` on every
+// XHR it issues; the header is absent on plain navigations.
+func isHTMXRequest(r *http.Request) bool {
+	return r.Header.Get("HX-Request") == "true"
+}
+
+// htmxLoginTarget builds the value for the HX-Redirect header when an
+// HTMX caller is unauthenticated. We preserve a same-origin GET path
+// in `next` so the operator lands back where they were after sign-in;
+// for non-GET HTMX calls (toggles, saves) we just send them to the
+// dashboard root.
+func htmxLoginTarget(r *http.Request) string {
+	if r.Method == http.MethodGet && r.URL.Path != "" && r.URL.Path != "/admin/login" {
+		return "/admin/login?next=" + url.QueryEscape(safeNext(r.URL.Path))
+	}
+	return "/admin/login"
+}
+
 // safeNext URL-escapes the path and rejects anything that isn't a
 // pure absolute path beginning with "/". Returns "/admin" as a safe
 // fallback otherwise.
@@ -128,8 +162,15 @@ func safeNext(p string) string {
 }
 
 // requestLogger wraps the mux to emit one structured log line per
-// request. Static asset requests are demoted to debug to keep the
-// info stream readable.
+// request. Routed to deps.RequestLogger when wired so the access log
+// — which can be very spammy due to 1-2s fragment polling — lives in
+// its own daily-rotated file rather than drowning out the main log.
+// Falls back to deps.Logger when no dedicated request logger is set
+// (test harnesses, embedded scenarios).
+//
+// Static asset requests are demoted to debug regardless of which sink
+// is active, in case operators raise the request log to debug for
+// triage.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -137,10 +178,11 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
 
-		level := "info"
-		if r.URL.Path == "/admin/static/" || hasPrefix(r.URL.Path, "/admin/static/") {
-			level = "debug"
+		sink := s.deps.RequestLogger
+		if sink == nil {
+			sink = s.deps.Logger
 		}
+
 		args := []any{
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -149,10 +191,10 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 			"duration", dur,
 			"remote", r.RemoteAddr,
 		}
-		if level == "debug" {
-			s.deps.Logger.Debug("admin request", args...)
+		if r.URL.Path == "/admin/static/" || hasPrefix(r.URL.Path, "/admin/static/") {
+			sink.Debug("admin request", args...)
 		} else {
-			s.deps.Logger.Info("admin request", args...)
+			sink.Info("admin request", args...)
 		}
 	})
 }

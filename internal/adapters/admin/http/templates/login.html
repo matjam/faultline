@@ -1,36 +1,38 @@
 {{define "content"}}
-<div class="hero min-h-[80vh]">
-  <div class="hero-content w-full max-w-md">
-    <div class="card w-full bg-base-100 shadow-xl">
-      <div class="card-body">
-        <h1 class="card-title text-2xl">Sign in</h1>
-        <p class="text-sm opacity-70 mb-4">Faultline admin UI</p>
+<canvas id="matrix-rain" class="matrix-rain"></canvas>
 
-        {{if .Error}}
-        <div class="alert alert-error mb-2">
-          <span>{{.Error}}</span>
-        </div>
-        {{end}}
+<div class="login-shell">
+  <div class="login-card boot-flicker">
+    <div class="login-title glow">▌FAULTLINE</div>
+    <div class="text-xs opacity-60 mb-5 mt-1">// secure shell &mdash; admin console</div>
 
-        <form method="POST" action="/admin/login" class="flex flex-col gap-3">
-          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-          <label class="floating-label">
-            <span>Username</span>
-            <input type="text" name="username" required autofocus
-                   autocomplete="username"
-                   class="input input-bordered w-full"
-                   value="{{.Username}}">
-          </label>
-          <label class="floating-label">
-            <span>Password</span>
-            <input type="password" name="password" required
-                   autocomplete="current-password"
-                   class="input input-bordered w-full">
-          </label>
-          <button type="submit" class="btn btn-primary mt-2">Sign in</button>
-        </form>
-      </div>
+    {{if .Error}}
+    <div class="alert alert-error mb-3">
+      <span>{{.Error}}</span>
     </div>
+    {{end}}
+
+    <form method="POST" action="/admin/login" class="flex flex-col gap-3">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <input type="hidden" name="next" value="{{.Next}}">
+
+      <label class="block">
+        <span class="text-xs opacity-70 block mb-1">user</span>
+        <input type="text" name="username" required autofocus
+               autocomplete="username"
+               class="input input-bordered w-full"
+               value="{{.Username}}">
+      </label>
+      <label class="block">
+        <span class="text-xs opacity-70 block mb-1">passphrase</span>
+        <input type="password" name="password" required
+               autocomplete="current-password"
+               class="input input-bordered w-full">
+      </label>
+      <button type="submit" class="btn btn-primary mt-2">▶ authenticate</button>
+    </form>
   </div>
 </div>
+
+<script src="/admin/static/matrixrain.js" defer></script>
 {{end}}
