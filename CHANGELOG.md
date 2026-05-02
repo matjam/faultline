@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0](https://github.com/matjam/faultline/compare/v1.7.0...v1.8.0) (2026-05-02)
+
+
+### Features
+
+* **admin:** matrix-themed dashboard with sidebar nav and reflective config form ([#43](https://github.com/matjam/faultline/issues/43)) ([faa6eed](https://github.com/matjam/faultline/commit/faa6eed303620a015acfd80b8998e6ed0185703d))
+* **prompts:** identity/operating split, changelog, softer compaction ([#41](https://github.com/matjam/faultline/issues/41)) ([a09a0d5](https://github.com/matjam/faultline/commit/a09a0d5a2d7ce9466e673ddee1f4816bf95af522))
+
 ## [1.7.0](https://github.com/matjam/faultline/compare/v1.6.0...v1.7.0) (2026-05-02)
 
 
