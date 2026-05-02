@@ -27,6 +27,7 @@ const (
 	defaultStdioIdleTimeout = 10 * time.Minute
 	stdioCloseTimeout       = 2 * time.Second
 	stderrTailLimit         = 32 * 1024
+	stdoutPreviewLimit      = 512
 )
 
 // StdioCommand is a container process request for a stdio MCP server.
@@ -505,7 +506,7 @@ func readResponse(r *bufio.Reader, id int) (json.RawMessage, error) {
 
 		var rpcResp jsonRPCResponse
 		if err := json.Unmarshal(line, &rpcResp); err != nil {
-			return nil, fmt.Errorf("parse json-rpc response: %w", err)
+			return nil, fmt.Errorf("parse json-rpc response: %w; raw stdout line: %q", err, stdoutPreview(line))
 		}
 		if rpcResp.ID != id {
 			continue
@@ -515,4 +516,12 @@ func readResponse(r *bufio.Reader, id int) (json.RawMessage, error) {
 		}
 		return rpcResp.Result, nil
 	}
+}
+
+func stdoutPreview(line []byte) string {
+	line = bytes.TrimSpace(line)
+	if len(line) > stdoutPreviewLimit {
+		line = append(append([]byte(nil), line[:stdoutPreviewLimit]...), []byte("...")...)
+	}
+	return string(line)
 }

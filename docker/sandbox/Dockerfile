@@ -16,46 +16,44 @@
 # deno, go, plus common LLM-friendly CLI tools (curl, wget, git, jq,
 # ripgrep, fd, ...).
 #
-# Base is Arch Linux's base-devel for an up-to-date toolchain on every
-# rebuild. Reproducibility comes from pinning the *published* image
-# (ghcr.io/matjam/faultline-sandbox:vX.Y.Z), not from pinning every
-# Arch package -- pacman versions move with each rebuild and that's
-# the point of using a rolling base.
+# Base is Debian bookworm because it publishes both amd64 and arm64 images.
+# Reproducibility comes from pinning the *published* image
+# (ghcr.io/matjam/faultline-sandbox:vX.Y.Z), not from pinning every package.
 
-FROM archlinux:base-devel
+FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/matjam/faultline"
-LABEL org.opencontainers.image.description="Faultline agent sandbox: multi-runtime execution environment (Python/uv, Node, Bun, Deno, Go) on Arch Linux"
+LABEL org.opencontainers.image.description="Faultline agent sandbox: multi-runtime execution environment (Python/uv, Node, Bun, Deno, Go) on Debian"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # pipefail so a failure in any stage of `curl ... | sh` aborts the build.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ---------------------------------------------------------------------------
-# pacman: system tools and language runtimes from official repos.
+# apt: system tools and language runtimes from official repos.
 #
 # Single RUN to keep one tight layer. Sync DBs, full upgrade, install
 # everything we want, then purge caches so the image stays compact.
-# Versions are not pinned -- Arch is rolling and the published image
-# itself is the artifact-of-record.
+# Versions are not pinned -- the published image itself is the
+# artifact-of-record.
 # ---------------------------------------------------------------------------
-# hadolint ignore=DL3018
-RUN pacman -Syu --noconfirm --needed \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         bash coreutils findutils diffutils patch \
         ca-certificates openssl \
         curl wget \
         git \
-        jq ripgrep fd \
+        jq ripgrep fd-find \
         less tree which \
         tar gzip unzip zip \
-        openbsd-netcat \
+        netcat-openbsd \
         make \
-        python python-pip \
+        python3 python3-pip python-is-python3 \
         nodejs npm \
-        go \
-        deno \
-    && pacman -Scc --noconfirm \
-    && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
+        golang-go \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && ln -sf /usr/bin/pip3 /usr/local/bin/pip \
+    && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # uv + uvx via Astral's official installer.
@@ -71,6 +69,13 @@ ENV UV_INSTALL_DIR=/usr/local/bin
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --no-modify-path \
     && /usr/local/bin/uv --version \
     && /usr/local/bin/uvx --version
+
+# ---------------------------------------------------------------------------
+# deno via the official installer.
+# ---------------------------------------------------------------------------
+ENV DENO_INSTALL=/usr/local
+RUN curl -fsSL https://deno.land/install.sh | sh \
+    && /usr/local/bin/deno --version
 
 # ---------------------------------------------------------------------------
 # bun via the official installer.
@@ -115,7 +120,8 @@ ENV UV_CACHE_DIR=/cache \
 # no scenario where the sandbox should be able to log in or persist
 # state.
 # ---------------------------------------------------------------------------
-RUN useradd -r -u 65532 -s /sbin/nologin -d /nonexistent sandbox
+RUN echo 'sandbox:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd \
+    && echo 'sandbox:x:65532:' >> /etc/group
 USER 65532:65532
 
 WORKDIR /

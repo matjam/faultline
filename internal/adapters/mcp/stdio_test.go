@@ -118,6 +118,22 @@ func TestStdioClientIncludesStderrWhenResponseEOF(t *testing.T) {
 	}
 }
 
+func TestStdioClientIncludesRawStdoutWhenResponseIsNotJSON(t *testing.T) {
+	client := NewStdioClient(
+		[]ServerConfig{helperStdioServerConfig(t, "tools/list")},
+		noisyStdoutStdioRunner{},
+		time.Minute,
+	)
+
+	_, err := client.Discover(context.Background(), "local")
+	if err == nil {
+		t.Fatal("expected discovery error")
+	}
+	if !strings.Contains(err.Error(), `raw stdout line: "GitHub MCP Server"`) {
+		t.Fatalf("error = %q, want raw stdout detail", err)
+	}
+}
+
 func helperStdioServerConfig(t *testing.T, wantMethod string) ServerConfig {
 	t.Helper()
 	return ServerConfig{
@@ -129,6 +145,16 @@ func helperStdioServerConfig(t *testing.T, wantMethod string) ServerConfig {
 			"MCP_WANT_METHOD": wantMethod,
 		},
 	}
+}
+
+type noisyStdoutStdioRunner struct{}
+
+func (noisyStdoutStdioRunner) Start(ctx context.Context, cmd StdioCommand) (StdioProcess, error) {
+	return &failingStdioProcess{
+		stdin:  nopWriteCloser{},
+		stdout: strings.NewReader("GitHub MCP Server\n"),
+		stderr: strings.NewReader(""),
+	}, nil
 }
 
 type failingStdioRunner struct{}

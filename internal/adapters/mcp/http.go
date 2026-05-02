@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -341,8 +342,8 @@ func (e httpStatusError) Error() string {
 }
 
 func isSessionExpired(err error) bool {
-	statusErr, ok := err.(httpStatusError)
-	return ok && statusErr.status == http.StatusNotFound
+	var statusErr httpStatusError
+	return errors.As(err, &statusErr) && statusErr.status == http.StatusNotFound
 }
 
 func readHTTPResponse(body io.Reader, contentType string, id int) (json.RawMessage, error) {

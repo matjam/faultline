@@ -239,7 +239,7 @@ func TestHTTPClientReusesStreamableHTTPSession(t *testing.T) {
 				t.Fatalf("Mcp-Session-Id = %q, want session-123", got)
 			}
 			callCount++
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"call %d"}]}}`, req.ID, callCount)))
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"call %d"}]}}`, req.ID, callCount)
 		default:
 			t.Fatalf("unexpected method %q", req.Method)
 		}
@@ -291,7 +291,7 @@ func TestHTTPClientReinitializesWhenSessionExpires(t *testing.T) {
 			if got := r.Header.Get("Mcp-Session-Id"); got != "session-2" {
 				t.Fatalf("Mcp-Session-Id = %q, want session-2", got)
 			}
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"fresh result"}]}}`, req.ID)))
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"fresh result"}]}}`, req.ID)
 		default:
 			t.Fatalf("unexpected method %q", req.Method)
 		}

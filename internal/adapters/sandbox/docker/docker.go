@@ -699,13 +699,13 @@ func (p *MCPStdioProcess) Stdout() io.Reader { return p.stdout }
 func (p *MCPStdioProcess) Stderr() io.Reader { return p.stderr }
 
 // Wait waits for the process to exit and kills containers when the parent
-// context is cancelled.
+// context is canceled.
 func (p *MCPStdioProcess) Wait() error {
 	defer p.cancel()
 	err := p.cmd.Wait()
 	if p.ctx.Err() != nil {
 		if p.logger != nil {
-			p.logger.Warn("mcp stdio context cancelled, killing container", "container", p.containerName)
+			p.logger.Warn("mcp stdio context canceled, killing container", "container", p.containerName)
 		}
 		killCmd := exec.Command("docker", "kill", p.containerName)
 		_ = killCmd.Run()
