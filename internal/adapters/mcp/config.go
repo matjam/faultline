@@ -54,8 +54,34 @@ type ServerConfig struct {
 	Env        map[string]string `json:"env,omitempty"`
 	URL        string            `json:"url,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
+	Auth       *AuthConfig       `json:"auth,omitempty"`
 	AllowTools []string          `json:"allow_tools,omitempty"`
 	DenyTools  []string          `json:"deny_tools,omitempty"`
+}
+
+// AuthConfig describes non-static authentication for one HTTP MCP server.
+// Endpoint and client fields are optional for spec-compliant MCP servers:
+// OAuthManager discovers protected-resource metadata and uses dynamic client
+// registration when the authorization server advertises it. Secret material is
+// intentionally represented by references only; access and refresh tokens live
+// in the OAuth credential store, not in mcp.json.
+type AuthConfig struct {
+	Type             string   `json:"type"`
+	CredentialRef    string   `json:"credential_ref,omitempty"`
+	Issuer           string   `json:"issuer,omitempty"`
+	AuthorizationURL string   `json:"authorization_url,omitempty"`
+	TokenURL         string   `json:"token_url,omitempty"`
+	ClientID         string   `json:"client_id,omitempty"`
+	ClientIDEnv      string   `json:"client_id_env,omitempty"`
+	ClientSecretEnv  string   `json:"client_secret_env,omitempty"`
+	ClientSecretFile string   `json:"client_secret_file,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+
+	ClientSecret      string `json:"client_secret,omitempty"`
+	AccessToken       string `json:"access_token,omitempty"`
+	RefreshToken      string `json:"refresh_token,omitempty"`
+	AuthorizationCode string `json:"authorization_code,omitempty"`
+	PKCEVerifier      string `json:"pkce_verifier,omitempty"`
 }
 
 // UnmarshalJSON accepts both this package's "env" field and the common MCP
@@ -85,6 +111,8 @@ type ServerStatus struct {
 	AllowTools        []string `json:"allow_tools,omitempty"`
 	CommandConfigured bool     `json:"command_configured,omitempty"`
 	URLConfigured     bool     `json:"url_configured,omitempty"`
+	AuthConfigured    bool     `json:"auth_configured,omitempty"`
+	AuthType          string   `json:"auth_type,omitempty"`
 	EnvKeys           []string `json:"env_keys,omitempty"`
 	HeaderKeys        []string `json:"header_keys,omitempty"`
 }
@@ -150,10 +178,49 @@ func (c ServerConfig) Validate() error {
 		if c.URL == "" {
 			return fmt.Errorf("url is required for http transport")
 		}
+		if c.Auth != nil {
+			if err := c.Auth.Validate(); err != nil {
+				return fmt.Errorf("auth: %w", err)
+			}
+		}
 	default:
 		return fmt.Errorf("unsupported transport %q", c.Transport)
 	}
 
+	return nil
+}
+
+// Validate rejects unsupported or unsafe auth config.
+func (c AuthConfig) Validate() error {
+	switch c.Type {
+	case "oauth_authorization_code":
+	default:
+		if c.Type == "" {
+			return fmt.Errorf("type is required")
+		}
+		return fmt.Errorf("unsupported type %q", c.Type)
+	}
+	if c.CredentialRef == "" {
+		return fmt.Errorf("credential_ref is required")
+	}
+	if !validCredentialRef(c.CredentialRef) {
+		return fmt.Errorf("credential_ref %q must contain only letters, digits, dots, underscores, hyphens, and slashes", c.CredentialRef)
+	}
+	if c.ClientSecret != "" {
+		return fmt.Errorf("client_secret must use client_secret_env or client_secret_file")
+	}
+	if c.AccessToken != "" {
+		return fmt.Errorf("access_token must not be stored in mcp.json")
+	}
+	if c.RefreshToken != "" {
+		return fmt.Errorf("refresh_token must not be stored in mcp.json")
+	}
+	if c.AuthorizationCode != "" {
+		return fmt.Errorf("authorization_code must not be stored in mcp.json")
+	}
+	if c.PKCEVerifier != "" {
+		return fmt.Errorf("pkce_verifier must not be stored in mcp.json")
+	}
 	return nil
 }
 
@@ -170,6 +237,24 @@ func isSandboxMCPWorkDir(value string) bool {
 	return clean == "/mcp" || strings.HasPrefix(clean, "/mcp/")
 }
 
+func validCredentialRef(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "..") {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '.', '_', '-', '/':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // AllowedTool reports whether name is exactly present in allow_tools.
 func (c ServerConfig) AllowedTool(name string) bool {
 	for _, allowed := range c.AllowTools {
@@ -182,15 +267,20 @@ func (c ServerConfig) AllowedTool(name string) bool {
 
 // Status returns a redacted server summary.
 func (c ServerConfig) Status() ServerStatus {
-	return ServerStatus{
+	status := ServerStatus{
 		Name:              c.Name,
 		Transport:         c.Transport,
 		AllowTools:        append([]string(nil), c.AllowTools...),
 		CommandConfigured: c.Command != "",
 		URLConfigured:     c.URL != "",
+		AuthConfigured:    c.Auth != nil,
 		EnvKeys:           sortedKeys(c.Env),
 		HeaderKeys:        sortedKeys(c.Headers),
 	}
+	if c.Auth != nil {
+		status.AuthType = c.Auth.Type
+	}
+	return status
 }
 
 // Status returns redacted discovery output, including tools that are not

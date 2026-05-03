@@ -18,7 +18,7 @@ import (
 )
 
 func TestSetupMCPDisabled(t *testing.T) {
-	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{}, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestSetupMCPDiscoversStdioServers(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, hostTestMCPStdioStarter{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, hostTestMCPStdioStarter{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestSetupMCPReportsStdioDiscoveryErrorWithoutSandbox(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestSetupMCPDiscoversHTTPServers(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestSetupMCPKeepsServerWhenDiscoveryFails(t *testing.T) {
 	caller, discovered, err := setupMCP(context.Background(), config.MCPConfig{
 		Enabled:    true,
 		ConfigFile: path,
-	}, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("setupMCP: %v", err)
 	}

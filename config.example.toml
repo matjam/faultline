@@ -212,6 +212,9 @@ binary_path = ""
 # run inside the sandbox container with the same mounts as sandbox_shell. Put
 # local stdio server files under sandbox/mcp/<server> and use container paths
 # such as /mcp/example/server.js in mcp.json.
+# HTTP OAuth MCP servers can use an auth block with only type + credential_ref
+# when the server publishes protected-resource metadata and dynamic client
+# registration.
 # Node-based stdio MCP packages can be installed with sandbox_shell using
 # `npm install --prefix /node <package>`; their bin scripts are available in
 # MCP config under /node/node_modules/.bin/.
@@ -223,6 +226,28 @@ enabled = false
 config_file = "./mcp.json"
 allow_agent_edit_config = false
 stdio_idle_timeout = "10m"
+
+# ---------------------------------------------------------------------------
+# [oauth] — OAuth runtime support for HTTP MCP servers.
+#
+# Telegram-driven OAuth setup needs a callback URL that the operator's browser
+# can reach. Loopback (http://127.0.0.1:8742) only works when the browser is on
+# the same machine as Faultline. For phone-based Telegram setup and Kubernetes,
+# set public_base_url to a public HTTPS URL (or a tunnel URL in local dev).
+#
+# OAuth tokens are stored outside mcp.json. The first backend is a local
+# 0600 JSON file; future deployments can swap this behind the same credential
+# store interface for Vault or another secret manager.
+# ---------------------------------------------------------------------------
+[oauth]
+# Standalone OAuth callback listener. This is separate from [admin], so OAuth
+# setup can work without enabling the admin dashboard.
+bind = "127.0.0.1:8743"
+
+public_base_url = ""
+callback_path = "/oauth/callback"
+state_ttl = "10m"
+credential_file = "./oauth-tokens.json"
 
 # ---------------------------------------------------------------------------
 # [limits] — content-size caps for LLM-facing surfaces.

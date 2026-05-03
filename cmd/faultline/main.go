@@ -217,7 +217,14 @@ func main() {
 		email = &cfg.Email
 	}
 
-	mcpCaller, mcpDiscovered, err := setupMCP(ctx, cfg.MCP, sandboxMCPStdioRunner{sandbox: sb}, logger)
+	oauthStore := mcp.NewFileCredentialStore(cfg.OAuth.CredentialFile)
+	oauthManager := mcp.NewOAuthManager(nil, mcp.OAuthOptions{
+		PublicBaseURL: cfg.OAuth.PublicBaseURL,
+		CallbackPath:  cfg.OAuth.CallbackPath,
+		StateTTL:      cfg.OAuth.StateTTL.Duration(),
+	}, oauthStore, nil)
+
+	mcpCaller, mcpDiscovered, err := setupMCP(ctx, cfg.MCP, oauthManager, sandboxMCPStdioRunner{sandbox: sb}, logger)
 	if err != nil {
 		logger.Error("init mcp", "error", err)
 		os.Exit(1)
@@ -336,6 +343,13 @@ func main() {
 		logger.Info("subagent support disabled, subagent_* tools not advertised")
 	}
 
+	oauthSrv, err := buildOAuthCallbackServer(cfg.OAuth, oauthManager, logger)
+	if err != nil {
+		logger.Error("OAuth callback server failed to configure", "error", err)
+		os.Exit(1)
+	}
+	oauthSrv.Start(ctx)
+
 	// Admin UI is constructed BEFORE the tool executor when enabled,
 	// because the executor takes the admin's tool ring buffer as its
 	// Observer. Inspectors are attached back to the admin server
@@ -367,8 +381,9 @@ func main() {
 		MCPConfigEditEnabled: cfg.MCP.Enabled && cfg.MCP.AllowAgentEditConfig,
 		MCPApprovals:         mcpApprovals,
 		MCPReload: func(ctx context.Context) (mcp.Caller, []mcp.DiscoveredServer, error) {
-			return setupMCP(ctx, cfg.MCP, sandboxMCPStdioRunner{sandbox: sb}, logger)
+			return setupMCP(ctx, cfg.MCP, oauthManager, sandboxMCPStdioRunner{sandbox: sb}, logger)
 		},
+		MCPOAuth:        oauthManager,
 		Logger:          logger,
 		WebCache:        webCache,
 		MaxTokens:       cfg.Agent.MaxTokens,
@@ -466,6 +481,7 @@ func main() {
 		logger.Error("agent terminated with error", "error", err)
 		// Best-effort admin shutdown before exit.
 		forceCancel()
+		oauthSrv.Wait()
 		adminSrv.Wait()
 		adminSrv.Close()
 		os.Exit(1)
@@ -476,6 +492,7 @@ func main() {
 	// Wind down the admin server. The agent has saved state and
 	// returned; nothing else useful runs through the admin UI now.
 	forceCancel()
+	oauthSrv.Wait()
 	adminSrv.Wait()
 	adminSrv.Close()
 

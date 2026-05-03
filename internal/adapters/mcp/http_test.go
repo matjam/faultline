@@ -182,6 +182,149 @@ func TestHTTPClientCallToolSendsToolsCallRequest(t *testing.T) {
 	}
 }
 
+func TestHTTPClientAttachesOAuthBearerToken(t *testing.T) {
+	var sawAuth bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got == "Bearer oauth-access" {
+			sawAuth = true
+		} else {
+			t.Fatalf("Authorization = %q, want Bearer oauth-access", got)
+		}
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "session-123")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`))
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := NewHTTPClientWithAuth([]ServerConfig{
+		{
+			Name:      "coralogix",
+			Transport: "http",
+			URL:       server.URL,
+			Auth:      &AuthConfig{Type: "oauth_authorization_code", CredentialRef: "mcp/coralogix"},
+		},
+	}, server.Client(), &fakeOAuthTokenProvider{token: "oauth-access"})
+
+	if _, err := client.Discover(context.Background(), "coralogix"); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if !sawAuth {
+		t.Fatal("server did not receive OAuth Authorization header")
+	}
+}
+
+func TestHTTPClientRefreshesOAuthTokenOnceOn401(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req jsonRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode request: %v", err)
+		}
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "session-123")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			calls.Add(1)
+			if r.Header.Get("Authorization") == "Bearer old-token" {
+				http.Error(w, "expired", http.StatusUnauthorized)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer new-token" {
+				t.Fatalf("Authorization after refresh = %q, want Bearer new-token", got)
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	provider := &fakeOAuthTokenProvider{token: "old-token", refreshedToken: "new-token"}
+	client := NewHTTPClientWithAuth([]ServerConfig{
+		{
+			Name:      "coralogix",
+			Transport: "http",
+			URL:       server.URL,
+			Auth:      &AuthConfig{Type: "oauth_authorization_code", CredentialRef: "mcp/coralogix"},
+		},
+	}, server.Client(), provider)
+
+	result, err := client.CallTool(context.Background(), "coralogix", "query", nil)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("result = %q, want ok", result)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("tools/call count = %d, want 2", calls.Load())
+	}
+	if provider.refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", provider.refreshes)
+	}
+}
+
+func TestHTTPClientDiscoverSuggestsOAuthWhenChallengeHasResourceMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource", scope="openid offline_access"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient([]ServerConfig{{Name: "coralogix", Transport: "http", URL: server.URL}}, server.Client())
+
+	_, err := client.Discover(context.Background(), "coralogix")
+	if err == nil {
+		t.Fatal("expected discovery to fail")
+	}
+	for _, want := range []string{
+		"likely requires OAuth",
+		`"auth":{"type":"oauth_authorization_code","credential_ref":"mcp/coralogix","scopes":["openid","offline_access"]}`,
+		"mcp_oauth_start",
+		"openid offline_access",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q:\n%s", want, err)
+		}
+	}
+}
+
+func TestHTTPClientDiscoverDoesNotAssumeOAuthForGenericBearerChallenge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="github"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient([]ServerConfig{{Name: "github", Transport: "http", URL: server.URL}}, server.Client())
+
+	_, err := client.Discover(context.Background(), "github")
+	if err == nil {
+		t.Fatal("expected discovery to fail")
+	}
+	if !strings.Contains(err.Error(), "requires bearer authentication") {
+		t.Fatalf("error = %q, want bearer guidance", err)
+	}
+	if strings.Contains(err.Error(), "mcp_oauth_start") {
+		t.Fatalf("generic bearer challenge should not suggest OAuth start: %s", err)
+	}
+}
+
 func TestHTTPClientParsesStreamableHTTPSSEResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req jsonRPCRequest
@@ -446,4 +589,24 @@ func TestHTTPClientCloseDeletesStreamableHTTPSession(t *testing.T) {
 	if !deleted {
 		t.Fatal("expected Close to DELETE the server session")
 	}
+}
+
+type fakeOAuthTokenProvider struct {
+	token          string
+	refreshedToken string
+	refreshes      int
+}
+
+func (p *fakeOAuthTokenProvider) AccessToken(ctx context.Context, serverName string) (string, error) {
+	_ = ctx
+	_ = serverName
+	return p.token, nil
+}
+
+func (p *fakeOAuthTokenProvider) RefreshAccessToken(ctx context.Context, serverName string) (string, error) {
+	_ = ctx
+	_ = serverName
+	p.refreshes++
+	p.token = p.refreshedToken
+	return p.token, nil
 }

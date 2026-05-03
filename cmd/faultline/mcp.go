@@ -23,8 +23,11 @@ func (r sandboxMCPStdioRunner) Start(ctx context.Context, cmd mcp.StdioCommand) 
 	return r.sandbox.StartStdio(ctx, cmd.Name, cmd.Command, cmd.Args, cmd.WorkDir, cmd.Env)
 }
 
-func setupMCP(ctx context.Context, cfg config.MCPConfig, stdioRunner mcp.StdioRunner, logger *slog.Logger) (mcp.Caller, []mcp.DiscoveredServer, error) {
+func setupMCP(ctx context.Context, cfg config.MCPConfig, oauth *mcp.OAuthManager, stdioRunner mcp.StdioRunner, logger *slog.Logger) (mcp.Caller, []mcp.DiscoveredServer, error) {
 	if !cfg.Enabled {
+		if oauth != nil {
+			oauth.SetServers(nil)
+		}
 		return nil, nil, nil
 	}
 
@@ -43,10 +46,13 @@ func setupMCP(ctx context.Context, cfg config.MCPConfig, stdioRunner mcp.StdioRu
 			stdioServers = append(stdioServers, server)
 		}
 	}
+	if oauth != nil {
+		oauth.SetServers(mcpCfg.Servers)
+	}
 
 	router := mcp.NewRouter()
 	var discovered []mcp.DiscoveredServer
-	client := mcp.NewHTTPClient(httpServers, &http.Client{Timeout: 30 * time.Second})
+	client := mcp.NewHTTPClientWithAuth(httpServers, &http.Client{Timeout: 30 * time.Second}, oauth)
 	for _, server := range httpServers {
 		router.Add(server.Name, client)
 		entry, err := client.Discover(ctx, server.Name)

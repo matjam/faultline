@@ -129,7 +129,6 @@ func New(deps Deps) (*Server, error) {
 	if deps.Logger == nil {
 		return nil, errors.New("adminhttp: nil logger")
 	}
-
 	layoutBytes, err := fs.ReadFile(templateFS, "templates/layout.html")
 	if err != nil {
 		return nil, fmt.Errorf("adminhttp: read layout: %w", err)
