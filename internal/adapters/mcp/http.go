@@ -18,9 +18,17 @@ import (
 type HTTPClient struct {
 	servers map[string]ServerConfig
 	client  *http.Client
+	auth    OAuthTokenProvider
 
 	mu       sync.Mutex
 	sessions map[string]sessionInfo
+}
+
+// OAuthTokenProvider supplies and refreshes access tokens for OAuth-backed
+// HTTP MCP servers.
+type OAuthTokenProvider interface {
+	AccessToken(ctx context.Context, serverName string) (string, error)
+	RefreshAccessToken(ctx context.Context, serverName string) (string, error)
 }
 
 const defaultProtocolVersion = "2025-06-18"
@@ -50,6 +58,12 @@ type sessionInfo struct {
 
 // NewHTTPClient returns a client for HTTP MCP servers.
 func NewHTTPClient(servers []ServerConfig, client *http.Client) *HTTPClient {
+	return NewHTTPClientWithAuth(servers, client, nil)
+}
+
+// NewHTTPClientWithAuth returns a client for HTTP MCP servers with optional
+// OAuth token support.
+func NewHTTPClientWithAuth(servers []ServerConfig, client *http.Client, auth OAuthTokenProvider) *HTTPClient {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -58,7 +72,7 @@ func NewHTTPClient(servers []ServerConfig, client *http.Client) *HTTPClient {
 	for _, server := range servers {
 		byName[server.Name] = server
 	}
-	return &HTTPClient{servers: byName, client: client, sessions: make(map[string]sessionInfo)}
+	return &HTTPClient{servers: byName, client: client, auth: auth, sessions: make(map[string]sessionInfo)}
 }
 
 // Discover runs tools/list for one configured HTTP server.
@@ -266,6 +280,9 @@ func (c *HTTPClient) deleteSession(ctx context.Context, server ServerConfig, ses
 	for key, value := range server.Headers {
 		req.Header.Set(key, value)
 	}
+	if err := c.authorize(ctx, server, req); err != nil {
+		return err
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("delete mcp session: %w", err)
@@ -291,9 +308,45 @@ func (c *HTTPClient) do(ctx context.Context, server ServerConfig, session sessio
 		return nil, nil, fmt.Errorf("marshal json-rpc request: %w", err)
 	}
 
+	resp, err := c.doOnce(ctx, server, session, body, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized && c.auth != nil && server.Auth != nil {
+		_ = resp.Body.Close()
+		c.clearSession(server.Name)
+		if _, err := c.auth.RefreshAccessToken(ctx, server.Name); err != nil {
+			return nil, nil, err
+		}
+		resp, err = c.doOnce(ctx, server, session, body, true)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	defer resp.Body.Close()
+
+	if !expectResponse {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, resp.Header, newHTTPStatusError(server, resp.StatusCode, resp.Header)
+		}
+		return nil, resp.Header, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.Header, newHTTPStatusError(server, resp.StatusCode, resp.Header)
+	}
+
+	result, err := readHTTPResponse(resp.Body, resp.Header.Get("Content-Type"), id)
+	if err != nil {
+		return nil, resp.Header, err
+	}
+	return result, resp.Header, nil
+}
+
+func (c *HTTPClient) doOnce(ctx context.Context, server ServerConfig, session sessionInfo, body []byte, refreshed bool) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, fmt.Errorf("create mcp request: %w", err)
+		return nil, fmt.Errorf("create mcp request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -306,37 +359,117 @@ func (c *HTTPClient) do(ctx context.Context, server ServerConfig, session sessio
 	for key, value := range server.Headers {
 		req.Header.Set(key, value)
 	}
+	if err := c.authorizeWithMode(ctx, server, req, refreshed); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("call mcp server: %w", err)
+		return nil, fmt.Errorf("call mcp server: %w", err)
 	}
-	defer resp.Body.Close()
+	return resp, nil
+}
 
-	if !expectResponse {
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, resp.Header, fmt.Errorf("mcp server returned HTTP %d", resp.StatusCode)
-		}
-		return nil, resp.Header, nil
+func (c *HTTPClient) authorize(ctx context.Context, server ServerConfig, req *http.Request) error {
+	return c.authorizeWithMode(ctx, server, req, false)
+}
+
+func (c *HTTPClient) authorizeWithMode(ctx context.Context, server ServerConfig, req *http.Request, refreshed bool) error {
+	if c.auth == nil || server.Auth == nil {
+		return nil
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, resp.Header, httpStatusError{status: resp.StatusCode}
-	}
-
-	result, err := readHTTPResponse(resp.Body, resp.Header.Get("Content-Type"), id)
+	token, err := c.auth.AccessToken(ctx, server.Name)
 	if err != nil {
-		return nil, resp.Header, err
+		return err
 	}
-	return result, resp.Header, nil
+	if refreshed {
+		token, err = c.auth.AccessToken(ctx, server.Name)
+		if err != nil {
+			return err
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 type httpStatusError struct {
-	status int
+	status  int
+	message string
 }
 
 func (e httpStatusError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
 	return fmt.Sprintf("mcp server returned HTTP %d", e.status)
+}
+
+func newHTTPStatusError(server ServerConfig, status int, headers http.Header) httpStatusError {
+	return httpStatusError{status: status, message: httpStatusGuidance(server, status, headers)}
+}
+
+func httpStatusGuidance(server ServerConfig, status int, headers http.Header) string {
+	base := fmt.Sprintf("mcp server returned HTTP %d", status)
+	challenge := bearerChallenge(headers)
+	if challenge == "" {
+		return base
+	}
+	resourceMetadata := bearerChallengeParam(challenge, "resource_metadata")
+	scope := bearerChallengeParam(challenge, "scope")
+	if status == http.StatusUnauthorized {
+		if server.Headers["Authorization"] != "" {
+			return base + ": configured Authorization header was rejected. Check whether the bearer token is missing, invalid, expired, or for the wrong audience."
+		}
+		if server.Auth != nil && server.Auth.Type == "oauth_authorization_code" {
+			return base + ": configured OAuth credentials were rejected. Run mcp_oauth_status for this server, then mcp_oauth_start if authorization is needed."
+		}
+		if resourceMetadata != "" {
+			message := base + ": server likely requires OAuth. Propose an MCP config update adding " + MinimalOAuthAuthJSONWithScopes(server.Name, strings.Fields(scope)) + ", then run mcp_oauth_start for this server."
+			if scope != "" {
+				message += " The challenge requested scope " + scope + "."
+			}
+			return message
+		}
+		return base + ": server requires bearer authentication, but did not advertise OAuth protected-resource metadata. Configure a static Authorization header/token or provider-specific OAuth metadata before retrying."
+	}
+	if status == http.StatusForbidden && bearerChallengeParam(challenge, "error") == "insufficient_scope" {
+		if scope != "" {
+			return base + ": authenticated, but the token has insufficient scope. Required scope: " + scope + "."
+		}
+		return base + ": authenticated, but the token has insufficient scope."
+	}
+	return base
+}
+
+func bearerChallenge(headers http.Header) string {
+	for _, challenge := range headers.Values("WWW-Authenticate") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(challenge)), "bearer ") {
+			return challenge
+		}
+	}
+	return ""
+}
+
+func MinimalOAuthAuthJSON(serverName string) string {
+	return MinimalOAuthAuthJSONWithScopes(serverName, nil)
+}
+
+func MinimalOAuthAuthJSONWithScopes(serverName string, scopes []string) string {
+	block := struct {
+		Auth struct {
+			Type          string   `json:"type"`
+			CredentialRef string   `json:"credential_ref"`
+			Scopes        []string `json:"scopes,omitempty"`
+		} `json:"auth"`
+	}{}
+	block.Auth.Type = "oauth_authorization_code"
+	block.Auth.CredentialRef = "mcp/" + serverName
+	block.Auth.Scopes = scopes
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Sprintf(`"auth":{"type":"oauth_authorization_code","credential_ref":"mcp/%s"}`, serverName)
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(string(data), "{"), "}")
 }
 
 func isSessionExpired(err error) bool {

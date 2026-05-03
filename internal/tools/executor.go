@@ -118,6 +118,8 @@ var subagentForbidden = map[string]struct{}{
 	"mcp_list_servers":          {},
 	"mcp_discover_tools":        {},
 	"mcp_read_config":           {},
+	"mcp_oauth_start":           {},
+	"mcp_oauth_status":          {},
 	"mcp_restart_stdio_server":  {},
 	"mcp_propose_config_update": {},
 	"mcp_update_config":         {},
@@ -1008,7 +1010,9 @@ type Executor struct {
 	mcpConfigFile       string
 	mcpConfigEdit       bool
 	mcpApprovals        *mcp.Approvals
+	mcpApprovalNotifier func(string) error
 	mcpReload           func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error)
+	mcpOAuth            *mcp.OAuthManager
 	retiredMCPCallers   []mcp.Caller
 	logger              *slog.Logger
 	http                *http.Client
@@ -1066,7 +1070,9 @@ type Deps struct {
 	MCPConfigFile        string
 	MCPConfigEditEnabled bool
 	MCPApprovals         *mcp.Approvals
+	MCPApprovalNotifier  func(string) error
 	MCPReload            func(context.Context) (mcp.Caller, []mcp.DiscoveredServer, error)
+	MCPOAuth             *mcp.OAuthManager
 	Logger               *slog.Logger
 	WebCache             *WebCache
 	MaxTokens            int
@@ -1115,6 +1121,9 @@ func New(deps Deps) *Executor {
 	if deps.Sandbox != nil {
 		deps.Sandbox.SetOutputLimit(deps.Limits.SandboxOutputChars)
 	}
+	if deps.MCPApprovalNotifier == nil && deps.Telegram != nil {
+		deps.MCPApprovalNotifier = deps.Telegram.Send
+	}
 	skillsRoot := ""
 	if deps.Skills != nil {
 		skillsRoot = deps.Skills.Root()
@@ -1139,7 +1148,9 @@ func New(deps Deps) *Executor {
 		mcpConfigFile:       deps.MCPConfigFile,
 		mcpConfigEdit:       deps.MCPConfigEditEnabled,
 		mcpApprovals:        deps.MCPApprovals,
+		mcpApprovalNotifier: deps.MCPApprovalNotifier,
 		mcpReload:           deps.MCPReload,
+		mcpOAuth:            deps.MCPOAuth,
 		logger:              deps.Logger,
 		maxTokens:           deps.MaxTokens,
 		limits:              deps.Limits,
@@ -1306,9 +1317,13 @@ func (te *Executor) dispatch(ctx context.Context, call llm.ToolCall) string {
 	case "mcp_list_servers":
 		return te.mcpListServers()
 	case "mcp_discover_tools":
-		return te.mcpDiscoverTools()
+		return te.mcpDiscoverTools(ctx)
 	case "mcp_read_config":
 		return te.mcpReadConfig()
+	case "mcp_oauth_start":
+		return te.mcpOAuthStart(ctx, args)
+	case "mcp_oauth_status":
+		return te.mcpOAuthStatus(ctx, args)
 	case "mcp_restart_stdio_server":
 		return te.mcpRestartStdioServer(ctx, args)
 	case "mcp_propose_config_update":
@@ -1385,7 +1400,7 @@ func (te *Executor) mcpManagementToolDefs() []llm.Tool {
 		"type":       "object",
 		"properties": map[string]interface{}{},
 	}
-	return []llm.Tool{
+	defs := []llm.Tool{
 		{
 			Type: llm.ToolTypeFunction,
 			Function: &llm.FunctionDef{
@@ -1417,6 +1432,34 @@ func (te *Executor) mcpManagementToolDefs() []llm.Tool {
 			},
 		},
 	}
+	if te.mcpOAuth != nil {
+		oauthParams := map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"server_name": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"server_name"},
+		}
+		defs = append(defs,
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
+					Name:        "mcp_oauth_start",
+					Description: "Start OAuth setup for an already configured OAuth-backed HTTP MCP server. Returns a short-lived authorization URL to send to the operator; does not expose tokens, codes, or PKCE values.",
+					Parameters:  oauthParams,
+				},
+			},
+			llm.Tool{
+				Type: llm.ToolTypeFunction,
+				Function: &llm.FunctionDef{
+					Name:        "mcp_oauth_status",
+					Description: "Report OAuth status for an already configured OAuth-backed HTTP MCP server. Safe for Telegram; never returns tokens or raw callback details.",
+					Parameters:  oauthParams,
+				},
+			},
+		)
+	}
+	return defs
 }
 
 func (te *Executor) mcpConfigToolDefs() []llm.Tool {
@@ -1481,9 +1524,31 @@ func (te *Executor) mcpListServers() string {
 	return marshalToolResult(statuses)
 }
 
-func (te *Executor) mcpDiscoverTools() string {
-	statuses := make([]mcp.DiscoveryStatus, 0, len(te.mcpDiscovered))
-	for _, discovered := range te.mcpDiscovered {
+func (te *Executor) mcpDiscoverTools(ctx context.Context) string {
+	if te.mcpReload != nil && hasMCPDiscoveryError(te.mcpDiscovered) {
+		caller, discovered, err := te.mcpReload(ctx)
+		if err != nil {
+			return fmt.Sprintf("MCP discovery refresh failed: %s\n\nCached discovery:\n%s", err, marshalMCPDiscoveryStatuses(te.mcpDiscovered))
+		}
+		te.retireMCPCaller(te.mcpCaller)
+		te.mcpCaller = caller
+		te.mcpDiscovered = discovered
+	}
+	return marshalMCPDiscoveryStatuses(te.mcpDiscovered)
+}
+
+func hasMCPDiscoveryError(discovered []mcp.DiscoveredServer) bool {
+	for _, server := range discovered {
+		if server.DiscoveryError != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func marshalMCPDiscoveryStatuses(discovered []mcp.DiscoveredServer) string {
+	statuses := make([]mcp.DiscoveryStatus, 0, len(discovered))
+	for _, discovered := range discovered {
 		statuses = append(statuses, discovered.Status())
 	}
 	return marshalToolResult(statuses)
@@ -1542,7 +1607,23 @@ func (te *Executor) mcpProposeConfigUpdate(argsJSON string) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %s", err)
 	}
-	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\nconfig_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nAsk the collaborator to reply exactly with:\n%s", id, hash, diff, approvalText)
+	request := formatMCPApprovalRequest(id, hash, diff, approvalText)
+	if te.mcpApprovalNotifier != nil {
+		notification := formatMCPApprovalNotification(diff, approvalText)
+		if err := te.mcpApprovalNotifier(notification); err != nil {
+			return fmt.Sprintf("MCP config update proposed, but sending approval request failed: %s\n\n%s", err, request)
+		}
+		return fmt.Sprintf("MCP config update proposed and compact approval request sent to collaborator.\napproval_id: %s\nconfig_hash: %s\n\nExact proposed diff:\n```diff\n%s```", id, hash, diff)
+	}
+	return request
+}
+
+func formatMCPApprovalNotification(diff, approvalText string) string {
+	return fmt.Sprintf("A MCP config change has been requested:\n\n```diff\n%s```\n\nReview the proposed diff in the agent/tool output, then reply exactly with:\n`%s`", diff, approvalText)
+}
+
+func formatMCPApprovalRequest(id, hash, diff, approvalText string) string {
+	return fmt.Sprintf("MCP config update proposed.\napproval_id: %s\nconfig_hash: %s\n\nExact proposed diff:\n```diff\n%s```\nReply exactly with:\n%s", id, hash, diff, approvalText)
 }
 
 func (te *Executor) currentMCPConfig() (mcp.Config, string, string, error) {
@@ -1581,7 +1662,7 @@ func (te *Executor) mcpConfigDiff(proposed mcp.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fullFileUnifiedDiff(filepath.Base(te.mcpConfigFile), currentJSON, proposedJSON), nil
+	return unifiedDiff(filepath.Base(te.mcpConfigFile), currentJSON, proposedJSON), nil
 }
 
 func canonicalMCPConfigJSON(cfg mcp.Config) (string, error) {
@@ -1592,7 +1673,7 @@ func canonicalMCPConfigJSON(cfg mcp.Config) (string, error) {
 	return string(append(data, '\n')), nil
 }
 
-func fullFileUnifiedDiff(path, current, proposed string) string {
+func unifiedDiff(path, current, proposed string) string {
 	if path == "" || path == "." {
 		path = "mcp.json"
 	}
@@ -1602,20 +1683,149 @@ func fullFileUnifiedDiff(path, current, proposed string) string {
 
 	currentLines := splitDiffLines(current)
 	proposedLines := splitDiffLines(proposed)
+	ops := diffLineOps(currentLines, proposedLines)
+	hunks := diffHunks(ops, 3)
+	if len(hunks) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
 	fmt.Fprintf(&b, "--- a/%s\n", path)
 	fmt.Fprintf(&b, "+++ b/%s\n", path)
-	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", len(currentLines), len(proposedLines))
-	for _, line := range currentLines {
-		b.WriteString("-")
-		b.WriteString(line)
-	}
-	for _, line := range proposedLines {
-		b.WriteString("+")
-		b.WriteString(line)
+	for _, hunk := range hunks {
+		oldStart, oldCount, newStart, newCount := hunkRange(hunk)
+		fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+		for _, op := range hunk {
+			b.WriteByte(op.kind)
+			b.WriteString(op.line)
+		}
 	}
 	return b.String()
+}
+
+type diffOp struct {
+	kind       byte
+	line       string
+	oldLineNum int
+	newLineNum int
+}
+
+func diffLineOps(current, proposed []string) []diffOp {
+	lcs := make([][]int, len(current)+1)
+	for i := range lcs {
+		lcs[i] = make([]int, len(proposed)+1)
+	}
+	for i := len(current) - 1; i >= 0; i-- {
+		for j := len(proposed) - 1; j >= 0; j-- {
+			if current[i] == proposed[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	var ops []diffOp
+	i, j := 0, 0
+	oldLine, newLine := 1, 1
+	for i < len(current) && j < len(proposed) {
+		if current[i] == proposed[j] {
+			ops = append(ops, diffOp{kind: ' ', line: current[i], oldLineNum: oldLine, newLineNum: newLine})
+			i++
+			j++
+			oldLine++
+			newLine++
+		} else if lcs[i+1][j] >= lcs[i][j+1] {
+			ops = append(ops, diffOp{kind: '-', line: current[i], oldLineNum: oldLine, newLineNum: newLine})
+			i++
+			oldLine++
+		} else {
+			ops = append(ops, diffOp{kind: '+', line: proposed[j], oldLineNum: oldLine, newLineNum: newLine})
+			j++
+			newLine++
+		}
+	}
+	for i < len(current) {
+		ops = append(ops, diffOp{kind: '-', line: current[i], oldLineNum: oldLine, newLineNum: newLine})
+		i++
+		oldLine++
+	}
+	for j < len(proposed) {
+		ops = append(ops, diffOp{kind: '+', line: proposed[j], oldLineNum: oldLine, newLineNum: newLine})
+		j++
+		newLine++
+	}
+	return ops
+}
+
+func diffHunks(ops []diffOp, contextLines int) [][]diffOp {
+	var changed []int
+	for i, op := range ops {
+		if op.kind != ' ' {
+			changed = append(changed, i)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	var hunks [][]diffOp
+	start := maxInt(0, changed[0]-contextLines)
+	end := minInt(len(ops)-1, changed[0]+contextLines)
+	for _, idx := range changed[1:] {
+		nextStart := maxInt(0, idx-contextLines)
+		nextEnd := minInt(len(ops)-1, idx+contextLines)
+		if nextStart <= end+1 {
+			end = maxInt(end, nextEnd)
+			continue
+		}
+		hunks = append(hunks, ops[start:end+1])
+		start, end = nextStart, nextEnd
+	}
+	hunks = append(hunks, ops[start:end+1])
+	return hunks
+}
+
+func hunkRange(hunk []diffOp) (int, int, int, int) {
+	oldStart, newStart := 1, 1
+	for _, op := range hunk {
+		if op.kind != '+' {
+			oldStart = op.oldLineNum
+			break
+		}
+		oldStart = op.oldLineNum
+	}
+	for _, op := range hunk {
+		if op.kind != '-' {
+			newStart = op.newLineNum
+			break
+		}
+		newStart = op.newLineNum
+	}
+	oldCount, newCount := 0, 0
+	for _, op := range hunk {
+		if op.kind != '+' {
+			oldCount++
+		}
+		if op.kind != '-' {
+			newCount++
+		}
+	}
+	return oldStart, oldCount, newStart, newCount
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func splitDiffLines(s string) []string {
@@ -1662,6 +1872,64 @@ func (te *Executor) mcpUpdateConfig(ctx context.Context, argsJSON string) string
 		te.mcpDiscovered = discovered
 	}
 	return "MCP config updated."
+}
+
+func (te *Executor) mcpOAuthStart(ctx context.Context, argsJSON string) string {
+	var args struct {
+		ServerName string `json:"server_name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+	if args.ServerName == "" {
+		return "Error: server_name is required"
+	}
+	if te.mcpReload != nil {
+		caller, discovered, err := te.mcpReload(ctx)
+		if err != nil {
+			return fmt.Sprintf("MCP config refresh failed before OAuth start: %s", err)
+		}
+		te.retireMCPCaller(te.mcpCaller)
+		te.mcpCaller = caller
+		te.mcpDiscovered = discovered
+	}
+	server, ok := te.discoveredMCPServer(args.ServerName)
+	if !ok {
+		return fmt.Sprintf("Error: mcp server %q is not configured", args.ServerName)
+	}
+	if server.Transport != "http" || server.Auth == nil || server.Auth.Type != "oauth_authorization_code" {
+		if server.Transport == "http" && server.Auth == nil {
+			return fmt.Sprintf("Error: mcp server %q is not configured for OAuth authorization-code setup. If mcp_discover_tools showed an OAuth protected-resource challenge for this server, call mcp_read_config, use mcp_propose_config_update to propose adding %s to this server, get approval, apply it with mcp_update_config, then run mcp_oauth_start again.", args.ServerName, mcp.MinimalOAuthAuthJSON(args.ServerName))
+		}
+		return fmt.Sprintf("Error: mcp server %q is not configured for OAuth authorization-code setup", args.ServerName)
+	}
+	if te.mcpOAuth == nil {
+		return "MCP OAuth is not configured."
+	}
+	start, err := te.mcpOAuth.Start(ctx, args.ServerName)
+	if err != nil {
+		return fmt.Sprintf("Error: %s", err)
+	}
+	return marshalToolResult(start)
+}
+
+func (te *Executor) mcpOAuthStatus(ctx context.Context, argsJSON string) string {
+	var args struct {
+		ServerName string `json:"server_name"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return fmt.Sprintf("Error parsing arguments: %s", err)
+	}
+	if args.ServerName == "" {
+		return "Error: server_name is required"
+	}
+	if _, ok := te.discoveredMCPServer(args.ServerName); !ok {
+		return fmt.Sprintf("Error: mcp server %q is not configured", args.ServerName)
+	}
+	if te.mcpOAuth == nil {
+		return "MCP OAuth is not configured."
+	}
+	return marshalToolResult(te.mcpOAuth.Status(ctx, args.ServerName))
 }
 
 func (te *Executor) mcpRestartStdioServer(ctx context.Context, argsJSON string) string {
@@ -1718,12 +1986,17 @@ func (te *Executor) currentMCPServer(name string) (mcp.ServerConfig, error) {
 }
 
 func (te *Executor) knownMCPServer(name string) bool {
+	_, ok := te.discoveredMCPServer(name)
+	return ok
+}
+
+func (te *Executor) discoveredMCPServer(name string) (mcp.ServerConfig, bool) {
 	for _, discovered := range te.mcpDiscovered {
 		if discovered.Server.Name == name {
-			return true
+			return discovered.Server, true
 		}
 	}
-	return false
+	return mcp.ServerConfig{}, false
 }
 
 func (te *Executor) replaceMCPDiscovery(updated mcp.DiscoveredServer) {

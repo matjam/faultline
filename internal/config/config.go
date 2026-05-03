@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -23,6 +24,10 @@ type Config struct {
 	// MCP is optional; when Enabled, Faultline reads a dedicated MCP
 	// server config file and exposes only explicitly allowlisted tools.
 	MCP MCPConfig `toml:"mcp"`
+
+	// OAuth configures browser-based authorization flows used by HTTP
+	// MCP servers that require delegated access.
+	OAuth OAuthConfig `toml:"oauth"`
 
 	// Embeddings is optional; when Enabled, semantic search is added
 	// alongside BM25 in memory_search and memory mutations re-embed
@@ -218,6 +223,31 @@ type MCPConfig struct {
 	// inactivity. Defaults to 10m.
 	StdioIdleTimeout duration `toml:"stdio_idle_timeout"`
 }
+
+// OAuthConfig holds runtime settings for OAuth-backed MCP servers.
+type OAuthConfig struct {
+	// Bind is the address:port for the standalone OAuth callback server.
+	// Defaults to 127.0.0.1:8743.
+	Bind string `toml:"bind"`
+
+	// PublicBaseURL is the externally reachable base URL used to build OAuth
+	// redirect URIs. Telegram-driven setup requires this to be reachable from
+	// the operator's browser.
+	PublicBaseURL string `toml:"public_base_url"`
+
+	// CallbackPath is the HTTP path that receives OAuth authorization-code
+	// callbacks. Default "/oauth/callback".
+	CallbackPath string `toml:"callback_path"`
+
+	// StateTTL bounds pending OAuth authorization sessions. Default 10m.
+	StateTTL duration `toml:"state_ttl"`
+
+	// CredentialFile stores OAuth token sets for the local file-backed
+	// credential store. Default "./oauth-tokens.json".
+	CredentialFile string `toml:"credential_file"`
+}
+
+func (c OAuthConfig) Active() bool { return c.PublicBaseURL != "" }
 
 // EmbeddingsConfig holds optional semantic-search settings. When
 // Enabled, the agent constructs an OpenAI-compatible embeddings
@@ -522,6 +552,12 @@ func Default() *Config {
 			ConfigFile:       "./mcp.json",
 			StdioIdleTimeout: duration(10 * time.Minute),
 		},
+		OAuth: OAuthConfig{
+			Bind:           "127.0.0.1:8743",
+			CallbackPath:   "/oauth/callback",
+			StateTTL:       duration(10 * time.Minute),
+			CredentialFile: "./oauth-tokens.json",
+		},
 		Embeddings: EmbeddingsConfig{
 			Enabled:   false,
 			URL:       "https://api.openai.com/v1",
@@ -582,6 +618,21 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.MCP.StdioIdleTimeout.Duration() <= 0 {
 		cfg.MCP.StdioIdleTimeout = duration(10 * time.Minute)
+	}
+	if cfg.OAuth.Bind == "" {
+		cfg.OAuth.Bind = "127.0.0.1:8743"
+	}
+	if cfg.OAuth.CallbackPath == "" {
+		cfg.OAuth.CallbackPath = "/oauth/callback"
+	}
+	if !strings.HasPrefix(cfg.OAuth.CallbackPath, "/") {
+		cfg.OAuth.CallbackPath = "/" + cfg.OAuth.CallbackPath
+	}
+	if cfg.OAuth.StateTTL.Duration() <= 0 {
+		cfg.OAuth.StateTTL = duration(10 * time.Minute)
+	}
+	if cfg.OAuth.CredentialFile == "" {
+		cfg.OAuth.CredentialFile = "./oauth-tokens.json"
 	}
 
 	// Embeddings: backfill defaults when the operator enables the

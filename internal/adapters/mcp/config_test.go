@@ -34,6 +34,70 @@ func TestServerConfigValidateRejectsUnsafeServerName(t *testing.T) {
 	}
 }
 
+func TestServerConfigValidateAcceptsOAuthAuthReference(t *testing.T) {
+	cfg := ServerConfig{
+		Name:      "coralogix",
+		Transport: "http",
+		URL:       "https://api.eu1.coralogix.com/mgmt/api/v1/mcp",
+		Auth: &AuthConfig{
+			Type:          "oauth_authorization_code",
+			CredentialRef: "mcp/coralogix",
+			ClientIDEnv:   "CORALOGIX_CLIENT_ID",
+			Scopes:        []string{"openid", "offline_access"},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestServerConfigValidateRejectsInlineOAuthSecrets(t *testing.T) {
+	cases := []struct {
+		name string
+		auth AuthConfig
+	}{
+		{name: "client_secret", auth: AuthConfig{ClientSecret: "secret"}},
+		{name: "access_token", auth: AuthConfig{AccessToken: "access"}},
+		{name: "refresh_token", auth: AuthConfig{RefreshToken: "refresh"}},
+		{name: "authorization_code", auth: AuthConfig{AuthorizationCode: "code"}},
+		{name: "pkce_verifier", auth: AuthConfig{PKCEVerifier: "verifier"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := tc.auth
+			auth.Type = "oauth_authorization_code"
+			auth.CredentialRef = "mcp/coralogix"
+			cfg := ServerConfig{
+				Name:      "coralogix",
+				Transport: "http",
+				URL:       "https://api.eu1.coralogix.com/mgmt/api/v1/mcp",
+				Auth:      &auth,
+			}
+
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected inline OAuth secret to be rejected")
+			}
+		})
+	}
+}
+
+func TestServerConfigValidateRejectsUnsafeCredentialRef(t *testing.T) {
+	cfg := ServerConfig{
+		Name:      "coralogix",
+		Transport: "http",
+		URL:       "https://api.eu1.coralogix.com/mgmt/api/v1/mcp",
+		Auth: &AuthConfig{
+			Type:          "oauth_authorization_code",
+			CredentialRef: "../coralogix",
+		},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unsafe credential_ref to be rejected")
+	}
+}
+
 func TestServerConfigMissingAllowToolsAllowsNoTools(t *testing.T) {
 	cfg := ServerConfig{
 		Name:      "github",
@@ -293,6 +357,7 @@ func TestServerStatusDoesNotExposeSecrets(t *testing.T) {
 		URL:        "https://example.com/mcp?token=url-secret",
 		Headers:    map[string]string{"Authorization": "Bearer header-secret"},
 		Env:        map[string]string{"GITHUB_TOKEN": "env-secret"},
+		Auth:       &AuthConfig{Type: "oauth_authorization_code", CredentialRef: "mcp/github"},
 		AllowTools: []string{"search_repositories"},
 	}
 
@@ -302,12 +367,15 @@ func TestServerStatusDoesNotExposeSecrets(t *testing.T) {
 	}
 
 	status := string(data)
-	for _, secret := range []string{"url-secret", "header-secret", "env-secret", "example.com"} {
+	for _, secret := range []string{"url-secret", "header-secret", "env-secret", "example.com", "mcp/github"} {
 		if strings.Contains(status, secret) {
 			t.Fatalf("status exposed %q in %s", secret, status)
 		}
 	}
 	if !strings.Contains(status, "GITHUB_TOKEN") {
 		t.Fatalf("status should include env key name, got %s", status)
+	}
+	if !strings.Contains(status, "oauth_authorization_code") {
+		t.Fatalf("status should include auth type, got %s", status)
 	}
 }

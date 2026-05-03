@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,78 @@ func TestMCPConfigUpdateRequiresRawApproval(t *testing.T) {
 	}
 	if _, err := mcp.LoadConfig(path); err != nil {
 		t.Fatalf("LoadConfig: %v", err)
+	}
+}
+
+func TestMCPConfigProposalSendsApprovalRequestWhenNotifierConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	approvals := mcp.NewApprovals()
+	var sent []string
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         approvals,
+		MCPApprovalNotifier: func(text string) error {
+			sent = append(sent, text)
+			return nil
+		},
+	})
+
+	configJSON := `{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}`
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), configJSON),
+		},
+	})
+
+	if len(sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(sent))
+	}
+	for _, want := range []string{"A MCP config change has been requested:", "```diff", "Review the proposed diff in the agent/tool output, then reply exactly with:", "`APPROVE MCP"} {
+		if !strings.Contains(sent[0], want) {
+			t.Fatalf("sent approval request missing %q:\n%s", want, sent[0])
+		}
+	}
+	if !strings.Contains(sent[0], "diff --git") {
+		t.Fatalf("sent approval request should include compact diff:\n%s", sent[0])
+	}
+	if strings.Contains(sent[0], "ghp_") {
+		t.Fatalf("sent approval request leaked secret:\n%s", sent[0])
+	}
+	if !strings.Contains(got, "approval request sent") {
+		t.Fatalf("tool result = %q, want sent confirmation", got)
+	}
+	if strings.Contains(got, "APPROVE MCP") {
+		t.Fatalf("tool result should not rely on LLM relaying approval phrase:\n%s", got)
+	}
+}
+
+func TestMCPConfigProposalFallsBackWhenNotifierFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+		MCPApprovalNotifier: func(string) error {
+			return errors.New("telegram unavailable")
+		},
+	})
+
+	configJSON := `{"servers":[{"name":"github","transport":"http","url":"https://example.invalid/mcp","allow_tools":["search_repositories"]}]}`
+	got := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: proposalArgs(t, emptyMCPConfigHash(t), configJSON),
+		},
+	})
+
+	for _, want := range []string{"sending approval request failed", "telegram unavailable", "Exact proposed diff:", "APPROVE MCP"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback result missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -356,6 +429,45 @@ func TestMCPConfigProposalIncludesExactDiff(t *testing.T) {
 	}
 	if strings.Contains(proposal, "diff_hash:") {
 		t.Fatalf("proposal should label approval hash as config_hash, got:\n%s", proposal)
+	}
+}
+
+func TestMCPConfigProposalDiffShowsOnlyChangedHunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	current := mcp.Config{Servers: []mcp.ServerConfig{
+		{Name: "github", Transport: "http", URL: "https://example.invalid/mcp", AllowTools: []string{"search_repositories"}},
+		{Name: "slack", Transport: "http", URL: "https://mcp.slack.com/mcp", AllowTools: []string{"search"}},
+	}}
+	if err := mcp.SaveConfig(path, current); err != nil {
+		t.Fatal(err)
+	}
+	proposed := mcp.Config{Servers: []mcp.ServerConfig{
+		current.Servers[0],
+		{Name: "slack", Transport: "http", URL: "https://mcp.slack.com/mcp", AllowTools: []string{"search", "channels_history"}},
+	}}
+	te := New(Deps{
+		Logger:               silentTestLogger(),
+		MCPConfigFile:        path,
+		MCPConfigEditEnabled: true,
+		MCPApprovals:         mcp.NewApprovals(),
+	})
+	proposedJSON, err := canonicalMCPConfigJSON(proposed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proposal := te.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{
+			Name:      "mcp_propose_config_update",
+			Arguments: proposalArgs(t, configHash(t, current), proposedJSON),
+		},
+	})
+
+	if !strings.Contains(proposal, `+        "channels_history"`) {
+		t.Fatalf("proposal diff missing changed allowlist entry:\n%s", proposal)
+	}
+	if strings.Contains(proposal, `"name": "github"`) {
+		t.Fatalf("proposal diff included unrelated unchanged server:\n%s", proposal)
 	}
 }
 

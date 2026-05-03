@@ -16,7 +16,7 @@ func TestBuildConfigForm_CoversEverySection(t *testing.T) {
 
 	wantSections := []string{
 		"api", "agent", "telegram", "log", "sandbox", "email",
-		"limits", "update", "mcp", "embeddings", "skills",
+		"limits", "update", "mcp", "oauth", "embeddings", "skills",
 		"subagent", "admin",
 	}
 	got := form.SectionPaths()
@@ -63,6 +63,7 @@ func TestBuildConfigForm_ClassifiesFieldsByType(t *testing.T) {
 		{"agent.max_sleep", KindDuration},
 		{"sandbox.timeout", KindDuration},
 		{"update.check_interval", KindDuration},
+		{"oauth.state_ttl", KindDuration},
 		{"admin.session_ttl", KindDuration},
 
 		// selects

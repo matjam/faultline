@@ -107,6 +107,19 @@ func TestServer_Healthz(t *testing.T) {
 	}
 }
 
+func TestServer_OAuthCallbackNotFoundWhenUnwired(t *testing.T) {
+	ts := newTestServer(t)
+
+	resp, err := http.Get(ts.srv.URL + "/oauth/callback?state=state-123&code=code-456")
+	if err != nil {
+		t.Fatalf("GET callback: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestServer_DashboardRequiresAuth(t *testing.T) {
 	ts := newTestServer(t)
 	client := noFollowClient(newJar(t))

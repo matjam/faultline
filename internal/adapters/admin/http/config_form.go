@@ -158,6 +158,7 @@ var sectionTitles = map[string]string{
 	"limits":     "[limits] // content caps",
 	"update":     "[update] // self-update",
 	"mcp":        "[mcp] // model context protocol",
+	"oauth":      "[oauth] // MCP authorization",
 	"embeddings": "[embeddings] // semantic search",
 	"skills":     "[skills] // agent skills",
 	"subagent":   "[subagent] // delegation",
