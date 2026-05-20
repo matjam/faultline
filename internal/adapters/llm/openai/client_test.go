@@ -7,75 +7,116 @@ import (
 	"github.com/matjam/faultline/internal/llm"
 )
 
-// TestSanitizeForWire_LegacyBareAssistant covers the regression that
-// triggered this code: state files resumed from a previous run can
-// contain assistant messages with neither content nor tool_calls. With
-// `omitempty` on both struct fields they serialize over the wire as
-// literally `{"role":"assistant"}`, which Venice (and presumably other
-// strict OpenAI-compatible backends) rejects with HTTP 400 "list object
-// has no element 0". The sanitizer must inject placeholder content so
-// the wire shape satisfies the assistant content-or-tool_calls rule.
-func TestSanitizeForWire_LegacyBareAssistant(t *testing.T) {
-	in := []llm.Message{
-		{Role: llm.RoleSystem, Content: "system"},
-		{Role: llm.RoleUser, Content: "hello"},
-		{Role: llm.RoleAssistant}, // the offending shape
-		{Role: llm.RoleUser, Content: "?"},
-	}
-	out := sanitizeForWire(in)
-
-	// Input slice must not be mutated. Other adapters / loggers /
-	// inspectors share the same Messages slice through the agent loop;
-	// rewriting it under them would be a footgun.
-	if in[2].Content != "" {
-		t.Fatalf("sanitizeForWire mutated caller's slice: in[2].Content=%q", in[2].Content)
-	}
-	if out[2].Content != emptyAssistantPlaceholder {
-		t.Fatalf("expected placeholder %q, got %q", emptyAssistantPlaceholder, out[2].Content)
-	}
-
-	// Marshaling the sanitized message must produce a JSON object with
-	// a `content` field — the whole point of the fix.
-	raw, err := json.Marshal(out[2])
+// marshalOne is a tiny helper: convert one llm.Message through the wire
+// path and return the marshaled JSON for assertion. Keeps each test
+// focused on the per-role rule it cares about.
+func marshalOne(t *testing.T, m llm.Message) string {
+	t.Helper()
+	wire := toWireMessages([]llm.Message{m})
+	raw, err := json.Marshal(wire[0])
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if got, want := string(raw), `{"role":"assistant","content":"(no response)"}`; got != want {
-		t.Fatalf("wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
+	return string(raw)
+}
+
+// TestWire_AssistantWithToolCallsForcesEmptyContent is the core
+// regression. Venice rejects assistant messages with tool_calls when
+// `content` is either omitted or null; only an explicit empty string (or
+// non-empty string) is accepted. Confirmed empirically against
+// api.venice.ai with /v1/chat/completions returning HTTP 400 "list
+// object has no element 0" on the omitted-content payload.
+func TestWire_AssistantWithToolCallsForcesEmptyContent(t *testing.T) {
+	in := llm.Message{
+		Role: llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "sleep", Arguments: `{"seconds":1}`}},
+		},
+	}
+	got := marshalOne(t, in)
+	want := `{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"sleep","arguments":"{\"seconds\":1}"}}]}`
+	if got != want {
+		t.Fatalf("assistant+tool_calls wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
 	}
 }
 
-// TestSanitizeForWire_NoOp confirms that messages already satisfying the
-// content-or-tool_calls rule are returned untouched (and that the slice
-// is the exact same backing array — we promised no copy when no fix is
-// needed, which matters because the message log can be large).
-func TestSanitizeForWire_NoOp(t *testing.T) {
-	in := []llm.Message{
-		{Role: llm.RoleSystem, Content: "system"},
-		{Role: llm.RoleAssistant, Content: "i have content"},
-		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "x", Type: llm.ToolTypeFunction}}},
-		{Role: llm.RoleTool, Content: "result", ToolCallID: "x"},
-	}
-	out := sanitizeForWire(in)
-	if &out[0] != &in[0] {
-		t.Fatal("sanitizeForWire allocated a copy when none was needed")
+// TestWire_AssistantBareForcesEmptyContent covers the legacy state-file
+// case: bare `{"role":"assistant"}` entries from sessions that pre-date
+// the agent-side coercer. The wire layer still must emit an explicit
+// empty string so Venice accepts the request. (Going forward,
+// agent.coerceAssistantMessage substitutes a placeholder at append
+// time, so newly-recorded bare entries become e.g. "(no response)" on
+// disk — but the wire layer is the last line of defense.)
+func TestWire_AssistantBareForcesEmptyContent(t *testing.T) {
+	in := llm.Message{Role: llm.RoleAssistant}
+	got := marshalOne(t, in)
+	want := `{"role":"assistant","content":""}`
+	if got != want {
+		t.Fatalf("bare assistant wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
 	}
 }
 
-// TestSanitizeForWire_NonAssistantUntouched guards against the sanitizer
-// over-reaching. A user / tool / system message with no content is the
-// caller's problem (and rare); we only know what the assistant rule
-// requires.
-func TestSanitizeForWire_NonAssistantUntouched(t *testing.T) {
+// TestWire_AssistantWithContentPreserved verifies normal assistant
+// turns with real text content marshal unchanged.
+func TestWire_AssistantWithContentPreserved(t *testing.T) {
+	in := llm.Message{Role: llm.RoleAssistant, Content: "hello"}
+	got := marshalOne(t, in)
+	want := `{"role":"assistant","content":"hello"}`
+	if got != want {
+		t.Fatalf("assistant content wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
+	}
+}
+
+// TestWire_ToolMessageContentAlwaysEmitted covers Venice's required-
+// content rule on tool messages. We have never produced an empty-content
+// tool message in practice (the wrapper prepends a timestamp), but the
+// wire layer enforces the rule defensively.
+func TestWire_ToolMessageContentAlwaysEmitted(t *testing.T) {
+	got := marshalOne(t, llm.Message{Role: llm.RoleTool, Content: "result", ToolCallID: "call_1"})
+	want := `{"role":"tool","content":"result","tool_call_id":"call_1"}`
+	if got != want {
+		t.Fatalf("tool message wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
+	}
+
+	got = marshalOne(t, llm.Message{Role: llm.RoleTool, ToolCallID: "call_2"})
+	want = `{"role":"tool","content":"","tool_call_id":"call_2"}`
+	if got != want {
+		t.Fatalf("empty-content tool message wire shape mismatch:\n  got:  %s\n  want: %s", got, want)
+	}
+}
+
+// TestWire_UserSystemPreserveOmitempty makes sure the converter doesn't
+// over-reach: empty content on user/system messages is a caller bug we
+// don't want to silently paper over by emitting a meaningless empty
+// string. The omitempty behavior is preserved for these roles.
+func TestWire_UserSystemPreserveOmitempty(t *testing.T) {
+	got := marshalOne(t, llm.Message{Role: llm.RoleUser})
+	if got != `{"role":"user"}` {
+		t.Fatalf("empty user wire shape unexpected: %s", got)
+	}
+	got = marshalOne(t, llm.Message{Role: llm.RoleSystem})
+	if got != `{"role":"system"}` {
+		t.Fatalf("empty system wire shape unexpected: %s", got)
+	}
+	got = marshalOne(t, llm.Message{Role: llm.RoleUser, Content: "hi"})
+	if got != `{"role":"user","content":"hi"}` {
+		t.Fatalf("normal user wire shape unexpected: %s", got)
+	}
+}
+
+// TestWire_InputNotMutated guards the no-mutation contract — the
+// converter must not write through to the caller's llm.Message slice.
+func TestWire_InputNotMutated(t *testing.T) {
 	in := []llm.Message{
-		{Role: llm.RoleUser},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "x"}}},
 		{Role: llm.RoleTool, ToolCallID: "x"},
 	}
-	out := sanitizeForWire(in)
-	for i := range in {
-		if out[i].Content != "" {
-			t.Fatalf("sanitizer touched non-assistant message %d: %+v", i, out[i])
-		}
+	_ = toWireMessages(in)
+	if in[0].Content != "" {
+		t.Fatalf("toWireMessages mutated input[0].Content: %q", in[0].Content)
+	}
+	if in[1].Content != "" {
+		t.Fatalf("toWireMessages mutated input[1].Content: %q", in[1].Content)
 	}
 }
 

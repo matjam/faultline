@@ -84,47 +84,85 @@ func (l *Client) SetChatLog(c *ChatLogger) {
 	l.chatLog = c
 }
 
-// emptyAssistantPlaceholder is the text we substitute into outgoing
-// assistant messages that would otherwise have neither content nor
-// tool_calls. The OpenAI chat-completions spec is silent on whether this
-// is legal; in practice servers diverge. KoboldCpp and OpenAI proper
-// accept the bare `{"role":"assistant"}` shape on replay. Venice (and
-// likely some others — vLLM with strict validation, etc.) rejects it
-// with a 400. Substituting a short non-empty string keeps message
-// indices stable (preserving tool_call_id chains) while satisfying
-// stricter validators. Reads correctly to a human reviewing the
-// transcript.
-const emptyAssistantPlaceholder = "(no response)"
-
-// sanitizeForWire returns a slice safe to POST to any OpenAI-compatible
-// backend. The only transformation today is filling in placeholder
-// content for assistant messages that have neither content nor
-// tool_calls. The input slice is not mutated; we allocate lazily and
-// only copy if a fix is actually needed.
+// wireMessage mirrors llm.Message but uses a pointer for Content so the
+// marshaller can distinguish "field intentionally absent" from "field
+// explicitly empty string". This matters because backends disagree on
+// what an assistant message with tool_calls and no text must look like:
 //
-// This belongs in the adapter rather than the agent loop because it's
-// strictly a wire-shape concern: the in-memory message log may
-// legitimately contain bare assistant turns (e.g. legacy state files
-// resumed from a prior run that used a more permissive backend). The
-// agent loop should also avoid producing them going forward — see
-// agent.coerceAssistantMessage — but this sanitizer is the
-// belt-and-braces defense at the boundary.
-func sanitizeForWire(msgs []llm.Message) []llm.Message {
-	out := msgs
-	copied := false
+//   - OpenAI / KoboldCpp / vLLM: accept content omitted entirely.
+//   - Venice: rejects with HTTP 400 "list object has no element 0"
+//     unless content is present as an explicit empty string (or a
+//     non-empty string). `"content": null` also fails. Empirically
+//     confirmed against the live API, May 2026.
+//
+// Our shared llm.Message uses `Content string` + `omitempty`, so it
+// cannot express "present but empty". Rather than mutating the shared
+// type (which is also the on-disk state-file shape and the API the rest
+// of the codebase reasons about), the wire shape is private here and
+// the toWireMessages converter decides per-role whether to force the
+// field on.
+type wireMessage struct {
+	Role       string         `json:"role"`
+	Content    *string        `json:"content,omitempty"`
+	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// emptyContent is the canonical "" pointer used when a message needs to
+// emit `"content": ""` on the wire. Sharing one pointer avoids 270+ tiny
+// allocations per request on a long resumed conversation.
+var emptyContent = func() *string { s := ""; return &s }()
+
+// toWireMessages converts the agent's message slice into the per-message
+// wire shape Venice (and presumably other strict OpenAI-compatible
+// backends) will accept. Rules:
+//
+//   - assistant: content is ALWAYS emitted. If the source message has
+//     non-empty content, that's what we send. If it has tool_calls but
+//     no content, we send "". If it has neither (legacy state files
+//     resumed from a prior run on a more permissive backend), we send
+//     "" — the on-disk shape is fixed at append time by
+//     agent.coerceAssistantMessage going forward, but the wire layer
+//     handles pre-existing entries too.
+//   - tool: content is ALWAYS emitted. Venice's schema marks it
+//     `required`. We have never produced an empty-content tool message
+//     in practice (the wrapper adds a timestamp prefix), but explicit
+//     emission costs nothing and removes one class of future surprise.
+//   - user / system: content emitted when non-empty. These roles
+//     legitimately may have empty content in odd edge cases (e.g. a
+//     blank shutdown prompt); the `omitempty` behavior is preserved.
+//
+// The input slice is never mutated.
+func toWireMessages(msgs []llm.Message) []wireMessage {
+	out := make([]wireMessage, len(msgs))
 	for i, m := range msgs {
-		if m.Role != llm.RoleAssistant {
-			continue
+		w := wireMessage{
+			Role:       m.Role,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
 		}
-		if m.Content != "" || len(m.ToolCalls) > 0 {
-			continue
+		switch m.Role {
+		case llm.RoleAssistant, llm.RoleTool:
+			// Always emit content for these roles. Backends that
+			// accept omitted content are equally happy with an
+			// explicit empty string; backends that reject omitted
+			// content need it. Force it on.
+			if m.Content == "" {
+				w.Content = emptyContent
+			} else {
+				c := m.Content
+				w.Content = &c
+			}
+		default:
+			// system / user / unknown: preserve omitempty semantics.
+			// Empty content here would be a caller bug; we don't
+			// want to mask it with an empty string on the wire.
+			if m.Content != "" {
+				c := m.Content
+				w.Content = &c
+			}
 		}
-		if !copied {
-			out = make([]llm.Message, len(msgs))
-			copy(out, msgs)
-			copied = true
-		}
-		out[i].Content = emptyAssistantPlaceholder
+		out[i] = w
 	}
 	return out
 }
@@ -135,7 +173,7 @@ func sanitizeForWire(msgs []llm.Message) []llm.Message {
 // needed to avoid sending defaults that override server-side configuration.
 type chatRequestWire struct {
 	Model    string        `json:"model"`
-	Messages []llm.Message `json:"messages"`
+	Messages []wireMessage `json:"messages"`
 	Tools    []llm.Tool    `json:"tools,omitempty"`
 
 	// Sampler params (OpenAI-spec). All `omitempty`: if the agent sets
@@ -199,7 +237,7 @@ func (e *apiError) Message() string {
 func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
 	wire := chatRequestWire{
 		Model:             l.model,
-		Messages:          sanitizeForWire(req.Messages),
+		Messages:          toWireMessages(req.Messages),
 		Tools:             req.Tools,
 		Temperature:       req.Temperature,
 		TopP:              req.TopP,
