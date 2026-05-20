@@ -84,6 +84,51 @@ func (l *Client) SetChatLog(c *ChatLogger) {
 	l.chatLog = c
 }
 
+// emptyAssistantPlaceholder is the text we substitute into outgoing
+// assistant messages that would otherwise have neither content nor
+// tool_calls. The OpenAI chat-completions spec is silent on whether this
+// is legal; in practice servers diverge. KoboldCpp and OpenAI proper
+// accept the bare `{"role":"assistant"}` shape on replay. Venice (and
+// likely some others — vLLM with strict validation, etc.) rejects it
+// with a 400. Substituting a short non-empty string keeps message
+// indices stable (preserving tool_call_id chains) while satisfying
+// stricter validators. Reads correctly to a human reviewing the
+// transcript.
+const emptyAssistantPlaceholder = "(no response)"
+
+// sanitizeForWire returns a slice safe to POST to any OpenAI-compatible
+// backend. The only transformation today is filling in placeholder
+// content for assistant messages that have neither content nor
+// tool_calls. The input slice is not mutated; we allocate lazily and
+// only copy if a fix is actually needed.
+//
+// This belongs in the adapter rather than the agent loop because it's
+// strictly a wire-shape concern: the in-memory message log may
+// legitimately contain bare assistant turns (e.g. legacy state files
+// resumed from a prior run that used a more permissive backend). The
+// agent loop should also avoid producing them going forward — see
+// agent.coerceAssistantMessage — but this sanitizer is the
+// belt-and-braces defense at the boundary.
+func sanitizeForWire(msgs []llm.Message) []llm.Message {
+	out := msgs
+	copied := false
+	for i, m := range msgs {
+		if m.Role != llm.RoleAssistant {
+			continue
+		}
+		if m.Content != "" || len(m.ToolCalls) > 0 {
+			continue
+		}
+		if !copied {
+			out = make([]llm.Message, len(msgs))
+			copy(out, msgs)
+			copied = true
+		}
+		out[i].Content = emptyAssistantPlaceholder
+	}
+	return out
+}
+
 // chatRequestWire is the JSON shape we POST. Kept separate from llm.ChatRequest
 // so we control exactly which keys appear on the wire (and with what
 // `omitempty` behavior). Fields here are pointers/zero-omitted where
@@ -108,15 +153,43 @@ type chatRequestWire struct {
 	RepetitionPenalty float32 `json:"repetition_penalty,omitempty"`
 }
 
-// apiError is the OpenAI-style error envelope: {"error": {"message": ...,
-// "type": ..., "code": ...}}. We try to decode this for non-2xx responses
-// to surface a useful message, and fall back to the raw body otherwise.
+// apiError is a tolerant decoder for the assorted error-envelope shapes
+// emitted by "OpenAI-compatible" backends on non-2xx responses. Two
+// known forms in the wild:
+//
+//   - OpenAI / KoboldCpp / vLLM (the spec shape):
+//     {"error": {"message": "...", "type": "...", "code": "..."}}
+//   - Venice (and presumably others):
+//     {"error": "string message", "request_id": "..."}
+//
+// We capture `error` as a raw message and try the object form first, the
+// string form second. The Message() helper returns whichever decoded
+// successfully, or "" if neither did (caller falls back to raw body).
 type apiError struct {
-	Error struct {
+	Error     json.RawMessage `json:"error"`
+	RequestID string          `json:"request_id,omitempty"`
+}
+
+// Message extracts a human-readable error string from whichever envelope
+// the server returned. Empty return means the body did not match either
+// known shape and the caller should fall back to the raw body.
+func (e *apiError) Message() string {
+	if len(e.Error) == 0 {
+		return ""
+	}
+	var obj struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 		Code    string `json:"code"`
-	} `json:"error"`
+	}
+	if json.Unmarshal(e.Error, &obj) == nil && obj.Message != "" {
+		return obj.Message
+	}
+	var s string
+	if json.Unmarshal(e.Error, &s) == nil && s != "" {
+		return s
+	}
+	return ""
 }
 
 // Chat sends a chat completion request and returns the parsed response.
@@ -126,7 +199,7 @@ type apiError struct {
 func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
 	wire := chatRequestWire{
 		Model:             l.model,
-		Messages:          req.Messages,
+		Messages:          sanitizeForWire(req.Messages),
 		Tools:             req.Tools,
 		Temperature:       req.Temperature,
 		TopP:              req.TopP,
@@ -217,9 +290,15 @@ func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatRespon
 		// error envelope.
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		var ae apiError
-		if json.Unmarshal(raw, &ae) == nil && ae.Error.Message != "" {
-			return nil, fmt.Errorf("chat completion: HTTP %d: %s",
-				resp.StatusCode, ae.Error.Message)
+		if json.Unmarshal(raw, &ae) == nil {
+			if msg := ae.Message(); msg != "" {
+				if ae.RequestID != "" {
+					return nil, fmt.Errorf("chat completion: HTTP %d: %s (request_id=%s)",
+						resp.StatusCode, msg, ae.RequestID)
+				}
+				return nil, fmt.Errorf("chat completion: HTTP %d: %s",
+					resp.StatusCode, msg)
+			}
 		}
 		return nil, fmt.Errorf("chat completion: HTTP %d: %s",
 			resp.StatusCode, strings.TrimSpace(string(raw)))
