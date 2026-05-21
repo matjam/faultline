@@ -84,13 +84,96 @@ func (l *Client) SetChatLog(c *ChatLogger) {
 	l.chatLog = c
 }
 
+// wireMessage mirrors llm.Message but uses a pointer for Content so the
+// marshaller can distinguish "field intentionally absent" from "field
+// explicitly empty string". This matters because backends disagree on
+// what an assistant message with tool_calls and no text must look like:
+//
+//   - OpenAI / KoboldCpp / vLLM: accept content omitted entirely.
+//   - Venice: rejects with HTTP 400 "list object has no element 0"
+//     unless content is present as an explicit empty string (or a
+//     non-empty string). `"content": null` also fails. Empirically
+//     confirmed against the live API, May 2026.
+//
+// Our shared llm.Message uses `Content string` + `omitempty`, so it
+// cannot express "present but empty". Rather than mutating the shared
+// type (which is also the on-disk state-file shape and the API the rest
+// of the codebase reasons about), the wire shape is private here and
+// the toWireMessages converter decides per-role whether to force the
+// field on.
+type wireMessage struct {
+	Role       string         `json:"role"`
+	Content    *string        `json:"content,omitempty"`
+	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// emptyContent is the canonical "" pointer used when a message needs to
+// emit `"content": ""` on the wire. Sharing one pointer avoids 270+ tiny
+// allocations per request on a long resumed conversation.
+var emptyContent = func() *string { s := ""; return &s }()
+
+// toWireMessages converts the agent's message slice into the per-message
+// wire shape Venice (and presumably other strict OpenAI-compatible
+// backends) will accept. Rules:
+//
+//   - assistant: content is ALWAYS emitted. If the source message has
+//     non-empty content, that's what we send. If it has tool_calls but
+//     no content, we send "". If it has neither (legacy state files
+//     resumed from a prior run on a more permissive backend), we send
+//     "" — the on-disk shape is fixed at append time by
+//     agent.coerceAssistantMessage going forward, but the wire layer
+//     handles pre-existing entries too.
+//   - tool: content is ALWAYS emitted. Venice's schema marks it
+//     `required`. We have never produced an empty-content tool message
+//     in practice (the wrapper adds a timestamp prefix), but explicit
+//     emission costs nothing and removes one class of future surprise.
+//   - user / system: content emitted when non-empty. These roles
+//     legitimately may have empty content in odd edge cases (e.g. a
+//     blank shutdown prompt); the `omitempty` behavior is preserved.
+//
+// The input slice is never mutated.
+func toWireMessages(msgs []llm.Message) []wireMessage {
+	out := make([]wireMessage, len(msgs))
+	for i, m := range msgs {
+		w := wireMessage{
+			Role:       m.Role,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
+		switch m.Role {
+		case llm.RoleAssistant, llm.RoleTool:
+			// Always emit content for these roles. Backends that
+			// accept omitted content are equally happy with an
+			// explicit empty string; backends that reject omitted
+			// content need it. Force it on.
+			if m.Content == "" {
+				w.Content = emptyContent
+			} else {
+				c := m.Content
+				w.Content = &c
+			}
+		default:
+			// system / user / unknown: preserve omitempty semantics.
+			// Empty content here would be a caller bug; we don't
+			// want to mask it with an empty string on the wire.
+			if m.Content != "" {
+				c := m.Content
+				w.Content = &c
+			}
+		}
+		out[i] = w
+	}
+	return out
+}
+
 // chatRequestWire is the JSON shape we POST. Kept separate from llm.ChatRequest
 // so we control exactly which keys appear on the wire (and with what
 // `omitempty` behavior). Fields here are pointers/zero-omitted where
 // needed to avoid sending defaults that override server-side configuration.
 type chatRequestWire struct {
 	Model    string        `json:"model"`
-	Messages []llm.Message `json:"messages"`
+	Messages []wireMessage `json:"messages"`
 	Tools    []llm.Tool    `json:"tools,omitempty"`
 
 	// Sampler params (OpenAI-spec). All `omitempty`: if the agent sets
@@ -108,15 +191,43 @@ type chatRequestWire struct {
 	RepetitionPenalty float32 `json:"repetition_penalty,omitempty"`
 }
 
-// apiError is the OpenAI-style error envelope: {"error": {"message": ...,
-// "type": ..., "code": ...}}. We try to decode this for non-2xx responses
-// to surface a useful message, and fall back to the raw body otherwise.
+// apiError is a tolerant decoder for the assorted error-envelope shapes
+// emitted by "OpenAI-compatible" backends on non-2xx responses. Two
+// known forms in the wild:
+//
+//   - OpenAI / KoboldCpp / vLLM (the spec shape):
+//     {"error": {"message": "...", "type": "...", "code": "..."}}
+//   - Venice (and presumably others):
+//     {"error": "string message", "request_id": "..."}
+//
+// We capture `error` as a raw message and try the object form first, the
+// string form second. The Message() helper returns whichever decoded
+// successfully, or "" if neither did (caller falls back to raw body).
 type apiError struct {
-	Error struct {
+	Error     json.RawMessage `json:"error"`
+	RequestID string          `json:"request_id,omitempty"`
+}
+
+// Message extracts a human-readable error string from whichever envelope
+// the server returned. Empty return means the body did not match either
+// known shape and the caller should fall back to the raw body.
+func (e *apiError) Message() string {
+	if len(e.Error) == 0 {
+		return ""
+	}
+	var obj struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 		Code    string `json:"code"`
-	} `json:"error"`
+	}
+	if json.Unmarshal(e.Error, &obj) == nil && obj.Message != "" {
+		return obj.Message
+	}
+	var s string
+	if json.Unmarshal(e.Error, &s) == nil && s != "" {
+		return s
+	}
+	return ""
 }
 
 // Chat sends a chat completion request and returns the parsed response.
@@ -126,7 +237,7 @@ type apiError struct {
 func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
 	wire := chatRequestWire{
 		Model:             l.model,
-		Messages:          req.Messages,
+		Messages:          toWireMessages(req.Messages),
 		Tools:             req.Tools,
 		Temperature:       req.Temperature,
 		TopP:              req.TopP,
@@ -217,9 +328,15 @@ func (l *Client) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatRespon
 		// error envelope.
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		var ae apiError
-		if json.Unmarshal(raw, &ae) == nil && ae.Error.Message != "" {
-			return nil, fmt.Errorf("chat completion: HTTP %d: %s",
-				resp.StatusCode, ae.Error.Message)
+		if json.Unmarshal(raw, &ae) == nil {
+			if msg := ae.Message(); msg != "" {
+				if ae.RequestID != "" {
+					return nil, fmt.Errorf("chat completion: HTTP %d: %s (request_id=%s)",
+						resp.StatusCode, msg, ae.RequestID)
+				}
+				return nil, fmt.Errorf("chat completion: HTTP %d: %s",
+					resp.StatusCode, msg)
+			}
 		}
 		return nil, fmt.Errorf("chat completion: HTTP %d: %s",
 			resp.StatusCode, strings.TrimSpace(string(raw)))

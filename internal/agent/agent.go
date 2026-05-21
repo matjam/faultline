@@ -191,6 +191,28 @@ func toolMessage(toolCallID, body string) llm.Message {
 	}
 }
 
+// emptyAssistantPlaceholder mirrors the wire-side sanitizer in
+// internal/adapters/llm/openai. Kept in sync intentionally: substituting
+// here means the in-memory log and the persisted state file both record
+// a non-empty content string, so even backends that never see the wire
+// sanitizer (future adapters, replay tools) get a clean log. The string
+// reads correctly to a human reviewing a transcript.
+const emptyAssistantPlaceholder = "(no response)"
+
+// coerceAssistantMessage substitutes placeholder content into an
+// assistant message that has neither content nor tool_calls. Some
+// backends (Venice, strict vLLM configurations) return 400 on bare
+// `{"role":"assistant"}` payloads; recording the placeholder at append
+// time prevents the log from ever containing such an entry. The wire-
+// side sanitizer in the openai adapter handles legacy state files that
+// pre-date this fix.
+func coerceAssistantMessage(msg llm.Message) llm.Message {
+	if msg.Role == llm.RoleAssistant && msg.Content == "" && len(msg.ToolCalls) == 0 {
+		msg.Content = emptyAssistantPlaceholder
+	}
+	return msg
+}
+
 // countMessageTokens returns the token count for a message log, using the
 // real tokenizer when available and falling back to the heuristic
 // otherwise. The tokenizer path uses a short timeout so a slow/failing
@@ -514,7 +536,7 @@ func (a *Agent) Run(ctx context.Context, shutdownCh <-chan struct{}) error {
 		}
 		a.recordChat(chatLatency, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, finishReason, nil)
 
-		msg := resp.Choices[0].Message
+		msg := coerceAssistantMessage(resp.Choices[0].Message)
 		messages = append(messages, msg)
 
 		if msg.Content != "" {
@@ -755,7 +777,7 @@ func (a *Agent) compactContext(ctx context.Context, toolCtx context.Context, mes
 			return nil, nil, fmt.Errorf("llm chat during compaction: %w", err)
 		}
 
-		msg := resp.Choices[0].Message
+		msg := coerceAssistantMessage(resp.Choices[0].Message)
 		messages = append(messages, msg)
 
 		if msg.Content != "" {
@@ -1009,7 +1031,7 @@ func (a *Agent) gracefulSave(ctx context.Context, messages []llm.Message, toolDe
 			return errShutdown
 		}
 
-		msg := resp.Choices[0].Message
+		msg := coerceAssistantMessage(resp.Choices[0].Message)
 		messages = append(messages, msg)
 
 		if msg.Content != "" {

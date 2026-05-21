@@ -188,7 +188,7 @@ func (a *Agent) applyOneMigration(
 			return "error: empty-response"
 		}
 
-		choice := resp.Choices[0].Message
+		choice := coerceAssistantMessage(resp.Choices[0].Message)
 		msgs = append(msgs, choice)
 		if choice.Content != "" {
 			a.logThought(choice.Content)
